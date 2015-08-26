@@ -1,26 +1,33 @@
 cmake_minimum_required(VERSION 2.8.5)
 project(sway C)
 set(CMAKE_C_FLAGS "-g")
+set(CMAKE_C_STANDARD 99)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "bin/")
 add_definitions("-Wall -Wextra -Wno-unused-parameter")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/CMake)
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND git describe --always
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+endif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+
+SET(GIT_VERSION_FLAG "-DSWAY_GIT_VERSION=\"${GIT_COMMIT_HASH}\"")
+
+add_definitions("${GIT_VERSION_FLAG}")
+
 find_package(XKBCommon REQUIRED)
 find_package(WLC REQUIRED)
 find_package(A2X REQUIRED)
-
-if (UNIX)
-   find_library(DL_LIBRARY dl)
-   mark_as_advanced(DL_LIBRARY)
-   if (NOT DL_LIBRARY)
-      message(FATAL_ERROR "libdl is needed on unix systems")
-   endif ()
-endif (UNIX)
+find_package(PCRE REQUIRED)
 
 FILE(GLOB sources ${PROJECT_SOURCE_DIR}/sway/*.c)
 
 include_directories(
    ${WLC_INCLUDE_DIRS}
+   ${PCRE_INCLUDE_DIRS}
    include/
 )
 
@@ -31,7 +38,7 @@ add_executable(sway
 target_link_libraries(sway
    ${WLC_LIBRARIES}
    ${XKBCOMMON_LIBRARIES}
-   ${DL_LIBRARY}
+   ${PCRE_LIBRARIES}
 )
 
 INSTALL(

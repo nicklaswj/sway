@@ -231,14 +231,7 @@ static void handle_view_destroyed(wlc_handle handle) {
 		break;
 	}
 
-	swayc_t *focused_view = get_focused_view(&root_container);
-	if (focused_view->type == C_WORKSPACE && focused_view->children->length == 0) {
-		if (focused_view->floating->length > 0) {
-			focused_view = focused_view->floating->items[focused_view->floating->length-1];
-			focused_view = get_focused_view(focused_view);
-		}
-	}
-	set_focused_container(focused_view);
+	set_focused_container(get_focused_view(&root_container));
 }
 
 static void handle_view_focus(wlc_handle view, bool focus) {
@@ -296,7 +289,7 @@ static void handle_view_state_request(wlc_handle view, enum wlc_view_state_bit s
 
 
 static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifiers,
-		uint32_t key, uint32_t sym, enum wlc_key_state state) {
+		uint32_t key, enum wlc_key_state state) {
 
 	if (locked_view_focus && state == WLC_KEY_STATE_PRESSED) {
 		return EVENT_PASSTHROUGH;
@@ -309,7 +302,8 @@ static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifier
 
 	struct sway_mode *mode = config->current_mode;
 
-	sym = tolower(sym);
+	struct wlc_modifiers no_mods = { 0, 0 };
+	uint32_t sym = tolower(wlc_keyboard_get_keysym_for_key(key, &no_mods));
 
 	int i;
 
