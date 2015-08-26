@@ -1,4 +1,5 @@
 CMakeCache.txt
+.clang_complete
 CMakeFiles
 Makefile
 cmake_install.cmake
