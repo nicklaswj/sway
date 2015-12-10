@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <wlc/wlc.h>
+#include <wlc/wlc-wayland.h>
 #include <ctype.h>
 
 #include "handlers.h"
@@ -13,77 +14,18 @@
 #include "stringop.h"
 #include "workspace.h"
 #include "container.h"
+#include "output.h"
 #include "focus.h"
 #include "input_state.h"
 #include "resize.h"
+#include "extensions.h"
+#include "criteria.h"
 
 // Event should be sent to client
 #define EVENT_PASSTHROUGH false
 
 // Event handled by sway and should not be sent to client
 #define EVENT_HANDLED true
-
-static bool pointer_test(swayc_t *view, void *_origin) {
-	const struct mouse_origin *origin = _origin;
-	// Determine the output that the view is under
-	swayc_t *parent = swayc_parent_by_type(view, C_OUTPUT);
-	if (origin->x >= view->x && origin->y >= view->y
-		&& origin->x < view->x + view->width && origin->y < view->y + view->height
-		&& view->visible && parent == root_container.focused) {
-		return true;
-	}
-	return false;
-}
-
-swayc_t *container_under_pointer(void) {
-	// root.output->workspace
-	if (!root_container.focused || !root_container.focused->focused) {
-		return NULL;
-	}
-	swayc_t *lookup = root_container.focused->focused;
-	// Case of empty workspace
-	if (lookup->children == 0) {
-		return NULL;
-	}
-	while (lookup->type != C_VIEW) {
-		int i;
-		int len;
-		// if tabbed/stacked go directly to focused container, otherwise search
-		// children
-		if (lookup->layout == L_TABBED || lookup->layout == L_STACKED) {
-			lookup = lookup->focused;
-			continue;
-		}
-		// if workspace, search floating
-		if (lookup->type == C_WORKSPACE) {
-			i = len = lookup->floating->length;
-			bool got_floating = false;
-			while (--i > -1) {
-				if (pointer_test(lookup->floating->items[i], &pointer_state.origin)) {
-					lookup = lookup->floating->items[i];
-					got_floating = true;
-					break;
-				}
-			}
-			if (got_floating) {
-				continue;
-			}
-		}
-		// search children
-		len = lookup->children->length;
-		for (i = 0; i < len; ++i) {
-			if (pointer_test(lookup->children->items[i], &pointer_state.origin)) {
-				lookup = lookup->children->items[i];
-				break;
-			}
-		}
-		// when border and titles are done, this could happen
-		if (i == len) {
-			break;
-		}
-	}
-	return lookup;
-}
 
 /* Handles */
 
@@ -102,6 +44,11 @@ static bool handle_output_created(wlc_handle output) {
 		swayc_t *ws = op->children->items[0];
 		workspace_switch(ws);
 	}
+
+	// Fixes issues with backgrounds and wlc
+	wlc_handle prev = wlc_get_focused_output();
+	wlc_output_focus(output);
+	wlc_output_focus(prev);
 	return true;
 }
 
@@ -121,6 +68,49 @@ static void handle_output_destroyed(wlc_handle output) {
 	if (list->length > 0) {
 		// switch to other outputs active workspace
 		workspace_switch(((swayc_t *)root_container.children->items[0])->focused);
+	}
+}
+
+static void handle_output_pre_render(wlc_handle output) {
+	struct wlc_size resolution = *wlc_output_get_resolution(output);
+
+	int i;
+	for (i = 0; i < desktop_shell.backgrounds->length; ++i) {
+		struct background_config *config = desktop_shell.backgrounds->items[i];
+		if (config->output == output) {
+			wlc_surface_render(config->surface, &(struct wlc_geometry){ wlc_origin_zero, resolution });
+			break;
+		}
+	}
+
+	for (i = 0; i < desktop_shell.panels->length; ++i) {
+		struct panel_config *config = desktop_shell.panels->items[i];
+		if (config->output == output) {
+			struct wlc_size size = *wlc_surface_get_size(config->surface);
+			struct wlc_geometry geo = {
+				.size = size
+			};
+			switch (desktop_shell.panel_position) {
+			case DESKTOP_SHELL_PANEL_POSITION_TOP:
+				geo.origin = (struct wlc_point){ 0, 0 };
+				break;
+			case DESKTOP_SHELL_PANEL_POSITION_BOTTOM:
+				geo.origin = (struct wlc_point){ 0, resolution.h - size.h };
+				break;
+			case DESKTOP_SHELL_PANEL_POSITION_LEFT:
+				geo.origin = (struct wlc_point){ 0, 0 };
+				break;
+			case DESKTOP_SHELL_PANEL_POSITION_RIGHT:
+				geo.origin = (struct wlc_point){ resolution.w - size.w, 0 };
+				break;
+			}
+			wlc_surface_render(config->surface, &geo);
+			if (size.w != desktop_shell.panel_size.w || size.h != desktop_shell.panel_size.h) {
+				desktop_shell.panel_size = size;
+				arrange_windows(&root_container, -1, -1);
+			}
+			break;
+		}
 	}
 }
 
@@ -156,6 +146,18 @@ static bool handle_view_created(wlc_handle handle) {
 	}
 	if (!focused || focused->type == C_OUTPUT) {
 		focused = get_focused_container(&root_container);
+		// Move focus from floating view
+		if (focused->is_floating) {
+			// To workspace if there are no children
+			if (focused->parent->children->length == 0) {
+				focused = focused->parent;
+			}
+			// TODO find a better way of doing this
+			// Or to focused container
+			else {
+				focused = get_focused_container(focused->parent->children->items[0]);
+			}
+		}
 	}
 	sway_log(L_DEBUG, "handle:%ld type:%x state:%x parent:%ld "
 			"mask:%d (x:%d y:%d w:%d h:%d) title:%s "
@@ -203,6 +205,21 @@ static bool handle_view_created(wlc_handle handle) {
 		set_focused_container(newview);
 		swayc_t *output = swayc_parent_by_type(newview, C_OUTPUT);
 		arrange_windows(output, -1, -1);
+		// check if it matches for_window in config and execute if so
+		list_t *criteria = criteria_for(newview);
+		for (int i = 0; i < criteria->length; i++) {
+			struct criteria *crit = criteria->items[i];
+			sway_log(L_DEBUG, "for_window '%s' matches new view %p, cmd: '%s'",
+					crit->crit_raw, newview, crit->cmdlist);
+			struct cmd_results *res = handle_command(crit->cmdlist);
+			if (res->status != CMD_SUCCESS) {
+				sway_log(L_ERROR, "Command '%s' failed: %s", res->input, res->error);
+			}
+			free_cmd_results(res);
+			// view must be focused for commands to affect it, so always
+			// refocus in-between command lists
+			set_focused_container(newview);
+		}
 	}
 	return true;
 }
@@ -211,15 +228,12 @@ static void handle_view_destroyed(wlc_handle handle) {
 	sway_log(L_DEBUG, "Destroying window %lu", handle);
 	swayc_t *view = swayc_by_handle(handle);
 
+	// destroy views by type
 	switch (wlc_view_get_type(handle)) {
 	// regular view created regularly
 	case 0:
 	case WLC_BIT_MODAL:
 	case WLC_BIT_POPUP:
-		if (view) {
-			swayc_t *parent = destroy_view(view);
-			arrange_windows(parent, -1, -1);
-		}
 		break;
 	// DMENU has this flag, and takes view_focus, but other things with this
 	// flag dont
@@ -231,6 +245,11 @@ static void handle_view_destroyed(wlc_handle handle) {
 		break;
 	}
 
+	if (view) {
+		swayc_t *parent = destroy_view(view);
+		remove_view_from_scratchpad(view);
+		arrange_windows(parent, -1, -1);
+	}
 	set_focused_container(get_focused_view(&root_container));
 }
 
@@ -239,8 +258,8 @@ static void handle_view_focus(wlc_handle view, bool focus) {
 }
 
 static void handle_view_geometry_request(wlc_handle handle, const struct wlc_geometry *geometry) {
-	sway_log(L_DEBUG, "geometry request %d x %d : %d x %d",
-			geometry->origin.x, geometry->origin.y, geometry->size.w, geometry->size.h);
+	sway_log(L_DEBUG, "geometry request for %ld %dx%d : %dx%d",
+			handle, geometry->origin.x, geometry->origin.y, geometry->size.w, geometry->size.h);
 	// If the view is floating, then apply the geometry.
 	// Otherwise save the desired width/height for the view.
 	// This will not do anything for the time being as WLC improperly sends geometry requests
@@ -313,12 +332,11 @@ static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifier
 		release_key(sym, key);
 	}
 
-	// TODO: reminder to check conflicts with mod+q+a versus mod+q
 	for (i = 0; i < mode->bindings->length; ++i) {
 		struct sway_binding *binding = mode->bindings->items[i];
 
 		if ((modifiers->mods ^ binding->modifiers) == 0) {
-			bool match;
+			bool match = false;
 			int j;
 			for (j = 0; j < binding->keys->length; ++j) {
 				xkb_keysym_t *key = binding->keys->items[j];
@@ -328,7 +346,11 @@ static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifier
 			}
 			if (match) {
 				if (state == WLC_KEY_STATE_PRESSED) {
-					handle_command(config, binding->command);
+					struct cmd_results *res = handle_command(binding->command);
+					if (res->status != CMD_SUCCESS) {
+						sway_log(L_ERROR, "Command '%s' failed: %s", res->input, res->error);
+					}
+					free_cmd_results(res);
 					return EVENT_HANDLED;
 				} else if (state == WLC_KEY_STATE_RELEASED) {
 					// TODO: --released
@@ -339,40 +361,64 @@ static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifier
 	return EVENT_PASSTHROUGH;
 }
 
-static bool handle_pointer_motion(wlc_handle handle, uint32_t time, const struct wlc_origin *origin) {
-	// Update pointer origin
-	pointer_state.delta.x = origin->x - pointer_state.origin.x;
-	pointer_state.delta.y = origin->y - pointer_state.origin.y;
-	pointer_state.origin.x = origin->x;
-	pointer_state.origin.y = origin->y;
+static bool handle_pointer_motion(wlc_handle handle, uint32_t time, const struct wlc_point *origin) {
+	struct wlc_point new_origin = *origin;
+	// Switch to adjacent output if touching output edge.
+	//
+	// Since this doesn't currently support moving windows between outputs we
+	// don't do the switch if the pointer is in a mode.
+	if (config->seamless_mouse && !pointer_state.mode &&
+			!pointer_state.left.held && !pointer_state.right.held && !pointer_state.scroll.held) {
 
-	// Update view under pointer
-	swayc_t *prev_view = pointer_state.view;
-	pointer_state.view = container_under_pointer();
-
-	// If pointer is in a mode, update it
-	if (pointer_state.mode) {
-		pointer_mode_update();
-	}
-	// Otherwise change focus if config is set an
-	else if (prev_view != pointer_state.view && config->focus_follows_mouse) {
-		if (pointer_state.view && pointer_state.view->type == C_VIEW) {
-			set_focused_container(pointer_state.view);
+		swayc_t *output = swayc_active_output(), *adjacent = NULL;
+		struct wlc_point abs_pos = *origin;
+		abs_pos.x += output->x;
+		abs_pos.y += output->y;
+		if (origin->x == 0) { // Left edge
+			if ((adjacent = swayc_adjacent_output(output, MOVE_LEFT, &abs_pos, false))) {
+				if (workspace_switch(swayc_active_workspace_for(adjacent))) {
+					new_origin.x = adjacent->width;
+					// adjust for differently aligned outputs (well, this is
+					// only correct when the two outputs have the same
+					// resolution or the same dpi I guess, it should take
+					// physical attributes into account)
+					new_origin.y += (output->y - adjacent->y);
+				}
+			}
+		} else if ((double)origin->x == output->width) { // Right edge
+			if ((adjacent = swayc_adjacent_output(output, MOVE_RIGHT, &abs_pos, false))) {
+				if (workspace_switch(swayc_active_workspace_for(adjacent))) {
+					new_origin.x = 0;
+					new_origin.y += (output->y - adjacent->y);
+				}
+			}
+		} else if (origin->y == 0) { // Top edge
+			if ((adjacent = swayc_adjacent_output(output, MOVE_UP, &abs_pos, false))) {
+				if (workspace_switch(swayc_active_workspace_for(adjacent))) {
+					new_origin.y = adjacent->height;
+					new_origin.x += (output->x - adjacent->x);
+				}
+			}
+		} else if ((double)origin->y == output->height) { // Bottom edge
+			if ((adjacent = swayc_adjacent_output(output, MOVE_DOWN, &abs_pos, false))) {
+				if (workspace_switch(swayc_active_workspace_for(adjacent))) {
+					new_origin.y = 0;
+					new_origin.x += (output->x - adjacent->x);
+				}
+			}
 		}
 	}
+
+	pointer_position_set(&new_origin, false);
 	return EVENT_PASSTHROUGH;
 }
 
 
 static bool handle_pointer_button(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifiers,
-		uint32_t button, enum wlc_button_state state, const struct wlc_origin *origin) {
+		uint32_t button, enum wlc_button_state state, const struct wlc_point *origin) {
 
 	// Update view pointer is on
 	pointer_state.view = container_under_pointer();
-
-	// Update pointer origin
-	pointer_state.origin.x = origin->x;
-	pointer_state.origin.y = origin->y;
 
 	// Update pointer_state
 	switch (button) {
@@ -423,9 +469,30 @@ static bool handle_pointer_button(wlc_handle view, uint32_t time, const struct w
 		return EVENT_PASSTHROUGH;
 	}
 
-	// set pointer mode
-	pointer_mode_set(button,
-		(modifiers->mods & config->floating_mod) == config->floating_mod);
+	// set pointer mode only if floating mod has been set
+	if (config->floating_mod) {
+		pointer_mode_set(button, !(modifiers->mods ^ config->floating_mod));
+	}
+
+	// Check whether to change focus
+	swayc_t *pointer = pointer_state.view;
+	if (pointer) {
+		if (focused != pointer) {
+			set_focused_container(pointer_state.view);
+		}
+		// Send to front if floating
+		if (pointer->is_floating) {
+			int i;
+			for (i = 0; i < pointer->parent->floating->length; i++) {
+				if (pointer->parent->floating->items[i] == pointer) {
+					list_del(pointer->parent->floating, i);
+					list_add(pointer->parent->floating, pointer);
+					break;
+				}
+			}
+			wlc_view_bring_to_front(pointer->handle);
+		}
+	}
 
 	// Return if mode has been set
 	if (pointer_state.mode) {
@@ -437,37 +504,24 @@ static bool handle_pointer_button(wlc_handle view, uint32_t time, const struct w
 		return EVENT_PASSTHROUGH;
 	}
 
-	// Check whether to change focus
-	swayc_t *pointer = pointer_state.view;
-	if (pointer && focused != pointer) {
-		set_focused_container(pointer_state.view);
-		// Send to front if floating
-		if (pointer->is_floating) {
-			int i;
-			for (i = 0; i < pointer->parent->floating->length; i++) {
-				if (pointer->parent->floating->items[i] == pointer) {
-					list_del(pointer->parent->floating, i);
-					list_add(pointer->parent->floating, pointer);
-					break;
-				}
-			}
-			wlc_view_bring_to_front(view);
-		}
-	}
-
 	// Finally send click
 	return EVENT_PASSTHROUGH;
 }
 
 static void handle_wlc_ready(void) {
 	sway_log(L_DEBUG, "Compositor is ready, executing cmds in queue");
-
-	int i;
-	for (i = 0; i < config->cmd_queue->length; ++i) {
-		handle_command(config, config->cmd_queue->items[i]);
-	}
-	free_flat_list(config->cmd_queue);
+	// Execute commands until there are none left
 	config->active = true;
+	while (config->cmd_queue->length) {
+		char *line = config->cmd_queue->items[0];
+		struct cmd_results *res = handle_command(line);
+		if (res->status != CMD_SUCCESS) {
+			sway_log(L_ERROR, "Error on line '%s': %s", line, res->error);
+		}
+		free_cmd_results(res);
+		free(line);
+		list_del(config->cmd_queue, 0);
+	}
 }
 
 struct wlc_interface interface = {
@@ -475,7 +529,10 @@ struct wlc_interface interface = {
 		.created = handle_output_created,
 		.destroyed = handle_output_destroyed,
 		.resolution = handle_output_resolution_change,
-		.focus = handle_output_focused
+		.focus = handle_output_focused,
+		.render = {
+			.pre = handle_output_pre_render
+		}
 	},
 	.view = {
 		.created = handle_view_created,

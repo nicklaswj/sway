@@ -1,0 +1,220 @@
+/////
+vim:set ts=4 sw=4 tw=82 noet:
+/////
+sway (5)
+========
+
+Name
+----
+sway - configuration file and commands
+
+Description
+-----------
+
+A sway configuration file is a list of sway commands that are executed by sway on
+startup. These commands usually consist of setting your preferences and setting
+key bindings. An example config is likely present in /etc/sway/config for you to
+check out.
+
+All of these commands may be issued at runtime through **sway-msg**(1).
+
+Commands
+--------
+
+**bindsym** <key combo> <command>::
+	Binds _key combo_ to execute _command_ when pressed. You may use XKB key
+	names here (**xev**(1) is a good tool for discovering them). An example
+	bindsym command would be _bindsym Mod1+Shift+f exec firefox_, which would
+	execute Firefox if the alt, shift, and F keys are pressed together. Any
+	valid sway command is eligible to be bound to a key combo.
+
+**exec** <shell command>::
+	Executes _shell command_ with sh.
+
+**exec_always** <shell command>::
+	Like exec, but the shell command will be executed _again_ after *reload* or
+	*restart* is executed.
+
+**exit**::
+	Exit sway and end your Wayland session.
+
+**floating** <enable|disable|toggle>::
+	Make focused view floating, non-floating, or the opposite of what it is now.
+
+**floating_modifier** <modifier>::
+	When the _modifier_ key is held down, you may use left click to drag floating
+	windows, and right click to resize them. Unlike i3, this modifier may also be
+	used to resize and move windows that are tiled.
+
+**focus** <direction>::
+	Direction may be one of _up_, _down_, _left_, _right_, or _parent_. The
+	directional focus commands will move the focus in that direction. The parent
+	focus command will change the focus to the parent of the currently focused
+	container, which is useful, for example, to open a sibling of the parent
+	container, or to move the entire container around.
+
+**focus** output <direction|name>::
+	Direction may be one of _up_, _down_, _left_, _right_. The directional focus
+	commands will move the focus to the output in that direction. When name is
+	given the focus is changed to the output with that name.
+
+**focus** mode_toggle::
+	Toggles focus between floating view and tiled view.
+
+**focus_follows_mouse** <yes|no>::
+	If set to _yes_, the currently focused view will change as you move your
+	mouse around the screen to the view that ends up underneath your mouse.
+
+**fullscreen**::
+	Toggles fullscreen status for the focused view.
+
+**for_window** <criteria> <command>::
+	Whenever a window that matches _criteria_ appears, run list of commands. See
+	**Criteria** section below.
+
+**gaps** edge_gaps <on|off|toggle>::
+	Whether or not to add gaps between views and workspace edges if amount of
+	inner gap is not zero. When _no_, no gap is added where the view is aligned to
+	the workspace edge, effectively creating gaps only between views.
+
+**gaps** <amount>::
+	Sets default _amount_ pixels as the gap between each view, and around each
+	workspace.
+
+**gaps** <inner|outer> <amount>::
+	Sets default _amount_ pixels as the _inner_ or _outer_ gap, where the former
+	affects spacing between views and the latter affects the space around each
+	workspace.
+
+**gaps** <inner|outer> <all|workspace|current> <set|plus|minus> <amount>::
+	Changes the gaps for the _inner_ or _outer_ gap. _all_ changes the gaps for
+	all views or workspace, _workspace_ changes gaps for all views in current
+	workspace (or current workspace), and _current_ changes gaps for the current
+	view or workspace.
+
+**kill**::
+	Closes the currently focused view.
+
+**layout** <mode>::
+	Sets the layout mode of the focused container. _mode_ can be one of _splith_,
+	_splitv_, or _toggle split_.
+
+**mode** <mode_name>::
+	Switches to the given mode_name. the default mode is simply _default_. To
+	create a new mode in config append _{_ to this command, the following lines
+	will be keybinds for that mode, and _}_ on its own line to close the block.
+
+**move** <left|right|up|down>::
+	Moves the focused container _left_, _right_, _up_, or _down_.
+
+**move** <container|window> to workspace <name>::
+	Moves the focused container to the workspace identified by _name_.
+	_name_ may be a special workspace name. See **workspace**.
+
+**move** <container|window|workspace> to output <name|direction>::
+	Moves the focused container or workspace to the output identified by _name_ or
+	_direction_. _direction_ may be one of _up_, _down_, _left_, _right_.
+
+**mouse_warping** <output|none>::
+	When _output_: place mouse at center of newly focused window when changing
+	output. When _none_: don't move mouse.
+
+**output** <name> <resolution|res> <WIDTHxHEIGHT>::
+	Configures the specified output to use the given resolution.
+
+**output** <name> <position|pos> <X,Y>::
+	Configures the specified output to be arranged at the given position.
+
+**output** <name> <background|bg> <file> <mode>::
+	Sets the wallpaper for the given output to the specified file, using the given
+	scaling mode (one of "stretch", "fill", "fit", "center", "tile").
+
+**output** <name> disable::
+	Disables the specified output.
+
+**NOTES FOR THE OUTPUT COMMAND**::
+	You may combine output commands into one, like so:
+	+
+	output HDMI-A-1 res 1920x1080 pos 1920,0 bg ~/wallpaper.png stretch
+	+
+	You can get a list of output names like so:
+	+
+	swaymsg -t get_outputs
+	+
+	You may also match any output by using the output name "*". Be sure to add
+	this output config after the others, or it will be matched instead of the
+	others.
+
+**reload**::
+	Reloads the sway config file without restarting sway.
+
+**resize** <shrink|grow> <width|height> <amount>::
+	Resizes the currently focused container or view by _amount_. _amount_ can be
+	specified as "n px" or "n ppt" or "n px or n ppt".
+
+**seamless_mouse** <on|off>::
+	Change output seamlessly when pointer touches edge of output. Outputs need to
+	be configured with perfectly aligned adjacent positions for this option to
+	have any effect.
+
+**set** <name> <value>::
+	Creates a substitution for _value_ that can be used with $_name_ in other
+	commands.
+
+**split** <vertical|v|horizontal|h>::
+	Splits the current container, vertically or horizontally.
+
+**splith**::
+	Equivalent to **split horizontal**.
+
+**splitv**::
+	Equivalent to **split vertical**.
+
+**sticky** <enable|disable|toggle>::
+	If enabled and the windows is floating it will always be present on the active
+	workspace on that output.
+
+**workspace** <name>::
+	Switches to the specified workspace.
+
+**workspace** <prev|next>::
+	Switches to the next workspace on the current output or on the next output
+	if currently on the last workspace.
+
+**workspace** <prev_on_output|next_on_output>::
+	Switches to the next workspace on the current output.
+
+**workspace** <name> output <output>::
+	Specifies that the workspace named _name_ should appear on the specified
+	_output_.
+
+Criteria
+--------
+
+A criteria is a string in the form of e.g.:
+
+	[class="[Rr]egex.*" title="some title"]
+
+The string contains one or more (space separated) attribute/value pairs and they
+are used by some commands filter which views to execute actions on. All attributes
+must match for the criteria string to match.
+
+Currently supported attributes:
+
+**class**::
+	Compare value against the window class. Can be a regular expression. If value
+	is _focused_ then the window class must be the same as that of the currently
+	focused window.
+
+**id**::
+	Compare value against the app id. Can be a regular expression.
+
+**title**::
+	Compare against the window title. Can be a regular expression. If value is
+	_focused_ then the window title must be the same as that of the currently
+	focused window.
+
+**workspace**::
+	Compare against the workspace name for this view. Can be a regular expression.
+	If value is _focused_ then all the views on the currently focused workspace
+	matches.

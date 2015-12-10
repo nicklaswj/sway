@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <wlc/wlc.h>
 #include <string.h>
+#include <strings.h>
 #include "workspace.h"
 #include "layout.h"
 #include "list.h"
@@ -12,6 +13,9 @@
 #include "stringop.h"
 #include "focus.h"
 #include "util.h"
+#include "ipc.h"
+
+char *prev_workspace_name = NULL;
 
 char *workspace_next_name(void) {
 	sway_log(L_DEBUG, "Workspace: Generating new name");
@@ -23,13 +27,19 @@ char *workspace_next_name(void) {
 
 	for (i = 0; i < mode->bindings->length; ++i) {
 		struct sway_binding *binding = mode->bindings->items[i];
-		const char* command = binding->command;
-		list_t *args = split_string(command, " ");
+		char *cmdlist = strdup(binding->command);
+		char *dup = cmdlist;
+		char *name = NULL;
 
-		if (strcmp("workspace", args->items[0]) == 0 && args->length > 1) {
-			sway_log(L_DEBUG, "Got valid workspace command for target: '%s'", (char *)args->items[1]);
-			char* target = malloc(strlen(args->items[1]) + 1);
-			strcpy(target, args->items[1]);
+		// workspace n
+		char *cmd = argsep(&cmdlist, " ");
+		if (cmdlist) {
+			name = argsep(&cmdlist, " ,;");
+		}
+
+		if (strcmp("workspace", cmd) == 0 && name) {
+			sway_log(L_DEBUG, "Got valid workspace command for target: '%s'", name);
+			char* target = strdup(name);
 			while (*target == ' ' || *target == '\t')
 				target++;
 
@@ -43,22 +53,20 @@ char *workspace_next_name(void) {
 				strcmp(target, "back_and_forth") == 0 ||
 				strcmp(target, "current") == 0)
 			{
-				free_flat_list(args);
+				free(target);
 				continue;
 			}
 
 			// Make sure that the workspace doesn't already exist
 			if (workspace_by_name(target)) {
-				free_flat_list(args);
+				free(target);
 				continue;
 			}
-
-			free_flat_list(args);
-
+			free(dup);
 			sway_log(L_DEBUG, "Workspace: Found free name %s", target);
 			return target;
 		}
-		free_flat_list(args);
+		free(dup);
 	}
 	// As a fall back, get the current number of active workspaces
 	// and return that + 1 for the next workspace's name
@@ -74,7 +82,26 @@ char *workspace_next_name(void) {
 }
 
 swayc_t *workspace_create(const char* name) {
-	swayc_t *parent = get_focused_container(&root_container);
+	swayc_t *parent;
+	// Search for workspace<->output pair
+	int i, e = config->workspace_outputs->length;
+	for (i = 0; i < e; ++i) {
+		struct workspace_output *wso = config->workspace_outputs->items[i];
+		if (strcasecmp(wso->workspace, name) == 0)
+		{
+			// Find output to use if it exists
+			e = root_container.children->length;
+			for (i = 0; i < e; ++i) {
+				parent = root_container.children->items[i];
+				if (strcmp(parent->name, wso->output) == 0) {
+					return new_workspace(parent, name);
+				}
+			}
+			break;
+		}
+	}
+	// Otherwise create a new one
+	parent = get_focused_container(&root_container);
 	parent = swayc_parent_by_type(parent, C_OUTPUT);
 	return new_workspace(parent, name);
 }
@@ -176,11 +203,49 @@ swayc_t *workspace_prev() {
 	return workspace_prev_next_impl(swayc_active_workspace(), false);
 }
 
-void workspace_switch(swayc_t *workspace) {
+bool workspace_switch(swayc_t *workspace) {
 	if (!workspace) {
-		return;
+		return false;
+	}
+	swayc_t *active_ws = swayc_active_workspace();
+	if (config->auto_back_and_forth && active_ws == workspace && prev_workspace_name) {
+		swayc_t *new_ws = workspace_by_name(prev_workspace_name);
+		workspace = new_ws ? new_ws : workspace_create(prev_workspace_name);
+	}
+
+	if (!prev_workspace_name
+			|| (strcmp(prev_workspace_name, active_ws->name)
+				&& active_ws != workspace)) {
+		free(prev_workspace_name);
+		prev_workspace_name = malloc(strlen(active_ws->name)+1);
+		strcpy(prev_workspace_name, active_ws->name);
+	}
+
+	// move sticky containers
+	if (swayc_parent_by_type(active_ws, C_OUTPUT) == swayc_parent_by_type(workspace, C_OUTPUT)) {
+		// don't change list while traversing it, use intermediate list instead
+		list_t *stickies = create_list();
+		for (int i = 0; i < active_ws->floating->length; i++) {
+			swayc_t *cont = active_ws->floating->items[i];
+			if (cont->sticky) {
+				list_add(stickies, cont);
+			}
+		}
+		for (int i = 0; i < stickies->length; i++) {
+			swayc_t *cont = stickies->items[i];
+			sway_log(L_DEBUG, "Moving sticky container %p to %p:%s",
+					cont, workspace, workspace->name);
+			swayc_t *parent = remove_child(cont);
+			add_floating(workspace, cont);
+			// Destroy old container if we need to
+			destroy_container(parent);
+		}
+		list_free(stickies);
 	}
 	sway_log(L_DEBUG, "Switching to workspace %p:%s", workspace, workspace->name);
-	set_focused_container(get_focused_view(workspace));
+	if (!set_focused_container(get_focused_view(workspace))) {
+		return false;
+	}
 	arrange_windows(workspace, -1, -1);
+	return true;
 }

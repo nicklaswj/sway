@@ -3,36 +3,48 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <libgen.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
 #include <string.h>
+#include <stringop.h>
 #include <execinfo.h>
 
 int colored = 1;
+log_importance_t loglevel_default = L_ERROR;
 log_importance_t v = L_SILENT;
 
 static const char *verbosity_colors[] = {
-	"", // L_SILENT
-	"\x1B[1;31m", // L_ERROR
-	"\x1B[1;34m", // L_INFO
-	"\x1B[1;30m", // L_DEBUG
+	[L_SILENT] = "",
+	[L_ERROR ] = "\x1B[1;31m",
+	[L_INFO  ] = "\x1B[1;34m",
+	[L_DEBUG ] = "\x1B[1;30m",
 };
 
 void init_log(log_importance_t verbosity) {
-	v = verbosity;
-	/* set FD_CLOEXEC flag to prevent programs called with exec to write into logs */
-	int i;
-	int fd[] = { STDOUT_FILENO, STDIN_FILENO, STDERR_FILENO };
-	for (i = 0; i < 3; ++i) {
-		int flag = fcntl(fd[i], F_GETFD);
-		if (flag != -1) {
-			fcntl(fd[i], F_SETFD, flag | FD_CLOEXEC);
-		}
+	if (verbosity != L_DEBUG) {
+		// command "debuglog" needs to know the user specified log level when
+		// turning off debug logging.
+		loglevel_default = verbosity;
 	}
+	v = verbosity;
 	signal(SIGSEGV, error_handler);
 	signal(SIGABRT, error_handler);
+}
+
+void set_log_level(log_importance_t verbosity) {
+	v = verbosity;
+}
+
+void reset_log_level(void) {
+	v = loglevel_default;
+}
+
+bool toggle_debug_logging(void) {
+	v = (v == L_DEBUG) ? loglevel_default : L_DEBUG;
+	return (v == L_DEBUG);
 }
 
 void sway_log_colors(int mode) {
@@ -49,7 +61,11 @@ void sway_abort(const char *format, ...) {
 	sway_terminate();
 }
 
-void sway_log(log_importance_t verbosity, const char* format, ...) {
+#ifndef NDEBUG
+void _sway_log(const char *filename, int line, log_importance_t verbosity, const char* format, ...) {
+#else
+void _sway_log(log_importance_t verbosity, const char* format, ...) {
+#endif
 	if (verbosity <= v) {
 		unsigned int c = verbosity;
 		if (c > sizeof(verbosity_colors) / sizeof(char *)) {
@@ -62,6 +78,11 @@ void sway_log(log_importance_t verbosity, const char* format, ...) {
 
 		va_list args;
 		va_start(args, format);
+#ifndef NDEBUG
+		char *file = strdup(filename);
+		fprintf(stderr, "[%s:%d] ", basename(file), line);
+		free(file);
+#endif
 		vfprintf(stderr, format, args);
 		va_end(args);
 
@@ -89,9 +110,7 @@ void sway_log_errno(log_importance_t verbosity, char* format, ...) {
 		va_end(args);
 
 		fprintf(stderr, ": ");
-		char error[256];
-		strerror_r(errno, error, sizeof(error));
-		fprintf(stderr, "%s", error);
+		fprintf(stderr, "%s", strerror(errno));
 
 		if (colored && isatty(STDERR_FILENO)) {
 			fprintf(stderr, "\x1B[0m");
@@ -105,14 +124,14 @@ bool _sway_assert(bool condition, const char* format, ...) {
 		return true;
 	}
 
-#ifndef NDEBUG
-	raise(SIGABRT);
-#endif
-
 	va_list args;
 	va_start(args, format);
 	sway_log(L_ERROR, format, args);
 	va_end(args);
+
+#ifndef NDEBUG
+	raise(SIGABRT);
+#endif
 
 	return false;
 }
@@ -138,63 +157,3 @@ void error_handler(int sig) {
 	}
 	exit(1);
 }
-
-#include "workspace.h"
-
-/* XXX:DEBUG:XXX */
-static void container_log(const swayc_t *c) {
-	fprintf(stderr, "focus:%c|",
-			c == get_focused_view(&root_container) ? 'K':
-			c == get_focused_container(&root_container) ? 'F' : // Focused
-			c == swayc_active_workspace() ? 'W' : // active workspace
-			c == &root_container  ? 'R' : // root
-			'X');// not any others
-	fprintf(stderr,"(%p)",c);
-	fprintf(stderr,"(p:%p)",c->parent);
-	fprintf(stderr,"(f:%p)",c->focused);
-	fprintf(stderr,"(h:%ld)",c->handle);
-	fprintf(stderr,"Type:");
-	fprintf(stderr,
-			c->type == C_ROOT   ? "Root|" :
-			c->type == C_OUTPUT ? "Output|" :
-			c->type == C_WORKSPACE ? "Workspace|" :
-			c->type == C_CONTAINER ? "Container|" :
-			c->type == C_VIEW   ? "View|" : "Unknown|");
-	fprintf(stderr,"layout:");
-	fprintf(stderr,
-			c->layout == L_NONE ? "NONE|" :
-			c->layout == L_HORIZ ? "Horiz|":
-			c->layout == L_VERT ? "Vert|":
-			c->layout == L_STACKED  ? "Stacked|":
-			c->layout == L_FLOATING ? "Floating|":
-			"Unknown|");
-	fprintf(stderr, "w:%f|h:%f|", c->width, c->height);
-	fprintf(stderr, "x:%f|y:%f|", c->x, c->y);
-	fprintf(stderr, "vis:%c|", c->visible?'t':'f');
-	fprintf(stderr, "name:%.16s|", c->name);
-	fprintf(stderr, "children:%d\n",c->children?c->children->length:0);
-}
-void layout_log(const swayc_t *c, int depth) {
-	if (L_DEBUG > v) return;
-	int i, d;
-	int e = c->children ? c->children->length : 0;
-	container_log(c);
-	if (e) {
-		for (i = 0; i < e; ++i) {
-			fputc('|',stderr);
-			for (d = 0; d < depth; ++d) fputc('-', stderr);
-			layout_log(c->children->items[i], depth + 1);
-		}
-	}
-	if (c->type == C_WORKSPACE) {
-		e = c->floating?c->floating->length:0;
-		if (e) {
-			for (i = 0; i < e; ++i) {
-				fputc('|',stderr);
-				for (d = 0; d < depth; ++d) fputc('=', stderr);
-				layout_log(c->floating->items[i], depth + 1);
-			}
-		}
-	}
-}
-/* XXX:DEBUG:XXX */

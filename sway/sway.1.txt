@@ -17,6 +17,9 @@ Synopsis
 Options
 -------
 
+*-h, --help*::
+	Show help message and quit.
+
 *-c, \--config* <config>::
 	Specifies a config file.
 
@@ -56,18 +59,20 @@ Commands
 
 If sway is currently running, you may run _sway [command]_ to send _command_ to
 the running instance of sway. The same commands you would use in the config file
-are valid here (see **sway**(5)). For compatability reasons, you may also issue
+are valid here (see **sway**(5)). For compatibility reasons, you may also issue
 commands with **sway-msg**(1) or **i3-msg**(1) (or even with **i3**(1), probably).
 
 Configuration
 -------------
 
 If _-c_ is not specified, sway will look in several locations for your config
-file. The default one is provided at /etc/sway/config. The suggested location for
-your config file is ~/.config/sway/config. ~/.sway/config will also work, and the
-rest of the usual XDG config locations are supported. If no sway config is found,
-sway will attempt to load an i3 config from all the config locations i3 supports.
-If still nothing is found, you will receive an error.
+file. The suggested location for your config file is ~/.config/sway/config.
+~/.sway/config will also work, and the rest of the usual XDG config locations
+are supported. At last, sway looks for a config file in a fallback directory,
+which is /etc/sway/ by default. A standard configuration file is installed at
+this location. If no sway config is found, sway will attempt to load an i3
+config from all the config locations i3 supports. If still nothing is found,
+you will receive an error.
 
 For information on the config file format, see **sway**(5).
 
@@ -81,4 +86,4 @@ source contributors. For more information about sway development, see
 See Also
 --------
 
-**sway**(5)
+**sway**(5) **swaymsg**(1) **swaygrab**(1)

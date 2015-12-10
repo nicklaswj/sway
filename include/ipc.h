@@ -10,9 +10,7 @@ enum ipc_command_type {
 	IPC_GET_MARKS = 5,
 	IPC_GET_BAR_CONFIG = 6,
 	IPC_GET_VERSION	= 7,
+	IPC_SWAY_GET_PIXELS = 0x81
 };
-
-void ipc_init(void);
-void ipc_terminate(void);
 
 #endif
