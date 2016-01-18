@@ -6,7 +6,7 @@ Read the [FAQ](https://github.com/SirCmpwn/sway/wiki). Join the
 [IRC channel](http://webchat.freenode.net/?channels=sway&uio=d4) (#sway on
 irc.freenode.net).
 
-![](https://sr.ht/i4Cu.png)
+![](https://sr.ht/NCx_.png)
 
 ## Rationale
 
@@ -15,7 +15,10 @@ zero lines of source code after two years.
 
 ## Status
 
-[See "i3 feature support"](https://github.com/SirCmpwn/sway/issues/2)
+- [i3 feature support](https://github.com/SirCmpwn/sway/issues/2)
+- [IPC feature support](https://github.com/SirCmpwn/sway/issues/98)
+- [i3bar feature support](https://github.com/SirCmpwn/sway/issues/343)
+- [i3-gaps feature support](https://github.com/SirCmpwn/sway/issues/307)
 
 ## Installation
 
@@ -27,6 +30,7 @@ available for you to install:
 * [Arch Linux](https://aur.archlinux.org/packages/sway-git/)
 * [Gentoo Linux](https://github.com/zetok/zetok-overlay/)
 * [openSUSE](https://build.opensuse.org/project/show/X11:Wayland)
+* [Void Linux](https://wiki.voidlinux.eu/sway)
 
 For other distros, [see this wiki page](https://github.com/SirCmpwn/sway/wiki/Install-on-other-distros).
 
@@ -41,29 +45,35 @@ Install dependencies:
 * asciidoc
 * pcre
 * json-c
-* pango
-* cairo
-* gdk-pixbuf2
+* pango *
+* cairo *
+* gdk-pixbuf2 *
+* pam **
+* imagemagick (required for image capture with swaygrab)
+* ffmpeg (required for video capture with swaygrab)
+
+_\*Only required for swaybar, swaybg, and swaylock_
+
+_\*\*Only required for swaylock_
 
 Run these commands:
 
     mkdir build
     cd build
-    cmake ..
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_SYSCONFDIR=/etc ..
     make
     sudo make install
 
 On systems without logind, you need to suid the sway binary:
 
-    sudo chmod a+s /usr/bin/sway
+    sudo chmod a+s /usr/local/bin/sway
 
 ## Configuration
 
 If you already use i3, then copy your i3 config to `~/.config/sway/config` and
 it'll work out of the box. Otherwise, copy the sample configuration file to
-`~/.config/sway/config`. It is located at `/etc/sway/config`, unless the 
-`DFALLBACK_CONFIG_DIR` flag has been set. Run `man 5 sway` for information on
-the configuration.
+`~/.config/sway/config`. It is usually located at `/etc/sway/config`.
+Run `man 5 sway` for information on the configuration.
 
 ## Running
 

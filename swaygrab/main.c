@@ -6,21 +6,13 @@
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
+#include <json-c/json.h>
 #include "log.h"
 #include "ipc-client.h"
+#include "util.h"
 
 void sway_terminate(void) {
 	exit(EXIT_FAILURE);
-}
-
-int numlen(int n) {
-	if (n >= 1000000) return 7;
-	if (n >= 100000) return 6;
-	if (n >= 10000) return 5;
-	if (n >= 1000) return 4;
-	if (n >= 100) return 3;
-	if (n >= 10) return 2;
-	return 1;
 }
 
 void grab_and_apply_magick(const char *file, const char *output,
@@ -80,7 +72,7 @@ void grab_and_apply_movie_magic(const char *file, const char *output,
 		"-video_size %dx%d -pixel_format argb "
 		"-i pipe:0 -r %d -vf vflip %s";
 	char *cmd = malloc(strlen(fmt) - 8 /*args*/
-			+ numlen(width) + numlen(height) + numlen(framerate) * 2 
+			+ numlen(width) + numlen(height) + numlen(framerate) * 2
 			+ strlen(file) + 1);
 	sprintf(cmd, fmt, framerate, width, height, framerate, file);
 
@@ -102,6 +94,7 @@ void grab_and_apply_movie_magic(const char *file, const char *output,
 
 		fwrite(pixels, 1, len, f);
 
+		free(pixels - 9);
 		clock_gettime(CLOCK_MONOTONIC, &finish);
 		ts.tv_nsec = ns;
 		double fts = (double)finish.tv_sec + 1.0e-9*finish.tv_nsec;
@@ -119,9 +112,47 @@ void grab_and_apply_movie_magic(const char *file, const char *output,
 	free(cmd);
 }
 
+char *get_focused_output(int socketfd) {
+	uint32_t len = 0;
+	char *res = ipc_single_command(socketfd, IPC_GET_WORKSPACES, NULL, &len);
+	json_object *workspaces = json_tokener_parse(res);
+
+	int length = json_object_array_length(workspaces);
+	json_object *workspace, *focused, *json_output;
+	char *output = NULL;
+	int i;
+	for (i = 0; i < length; ++i) {
+		workspace = json_object_array_get_idx(workspaces, i);
+		json_object_object_get_ex(workspace, "focused", &focused);
+		if (json_object_get_boolean(focused) == TRUE) {
+			json_object_object_get_ex(workspace, "output", &json_output);
+			output = strdup(json_object_get_string(json_output));
+			break;
+		}
+	}
+
+	json_object_put(workspaces);
+	free(res);
+	return output;
+}
+
+char *default_filename(const char *extension) {
+	int ext_len = strlen(extension);
+	int len = 28 + ext_len; // format: "2015-12-17-180040_swaygrab.ext"
+	char *filename = malloc(len * sizeof(char));
+	time_t t = time(NULL);
+
+	struct tm *lt = localtime(&t);
+	strftime(filename, len, "%Y-%m-%d-%H%M%S_swaygrab.", lt);
+	strncat(filename, extension, ext_len);
+
+	return filename;
+}
+
 int main(int argc, char **argv) {
 	static int capture = 0, raw = 0;
 	char *socket_path = NULL;
+	char *output = NULL;
 	int framerate = 30;
 
 	init_log(L_INFO);
@@ -129,6 +160,7 @@ int main(int argc, char **argv) {
 	static struct option long_options[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"capture", no_argument, NULL, 'c'},
+		{"output", required_argument, NULL, 'o'},
 		{"version", no_argument, NULL, 'v'},
 		{"socket", required_argument, NULL, 's'},
 		{"raw", no_argument, NULL, 'r'},
@@ -137,10 +169,11 @@ int main(int argc, char **argv) {
 	};
 
 	const char *usage =
-		"Usage: swaygrab [options] <output> [file]\n"
+		"Usage: swaygrab [options] [file]\n"
 		"\n"
 		"  -h, --help             Show help message and quit.\n"
 		"  -c, --capture          Capture video.\n"
+		"  -o, --output <output>  Output source.\n"
 		"  -v, --version          Show the version number and quit.\n"
 		"  -s, --socket <socket>  Use the specified socket.\n"
 		"  -R, --rate <rate>      Specify framerate (default: 30)\n"
@@ -149,7 +182,7 @@ int main(int argc, char **argv) {
 	int c;
 	while (1) {
 		int option_index = 0;
-		c = getopt_long(argc, argv, "hcvs:r", long_options, &option_index);
+		c = getopt_long(argc, argv, "hco:vs:r", long_options, &option_index);
 		if (c == -1) {
 			break;
 		}
@@ -159,6 +192,9 @@ int main(int argc, char **argv) {
 			break;
 		case 'r':
 			raw = 1;
+			break;
+		case 'o': // output
+			output = strdup(optarg);
 			break;
 		case 'c':
 			capture = 1;
@@ -187,22 +223,29 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	char *file = NULL, *output = NULL;
+	char *file = NULL;
 	if (raw) {
-		if (optind >= argc) {
+		if (optind >= argc + 1) {
 			sway_abort("Invalid usage. See `man swaygrab` %d %d", argc, optind);
 		}
-		output = argv[optind];
-	} else {
-		if (optind >= argc - 1) {
-			sway_abort("Invalid usage. See `man swaygrab`");
-		}
-		file = argv[optind + 1];
-		output = argv[optind];
+	} else if (optind < argc) {
+		file = strdup(argv[optind]);
 	}
 
 	int socketfd = ipc_open_socket(socket_path);
 	free(socket_path);
+
+	if (!output) {
+		output = get_focused_output(socketfd);
+	}
+
+	if (!file) {
+		if (!capture) {
+			file = default_filename("png");
+		} else {
+			file = default_filename("webm");
+		}
+	}
 
 	if (!capture) {
 		grab_and_apply_magick(file, output, socketfd, raw);
@@ -210,6 +253,8 @@ int main(int argc, char **argv) {
 		grab_and_apply_movie_magic(file, output, socketfd, raw, framerate);
 	}
 
+	free(output);
+	free(file);
 	close(socketfd);
 	return 0;
 }

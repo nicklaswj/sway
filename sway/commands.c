@@ -15,6 +15,7 @@
 #include "layout.h"
 #include "focus.h"
 #include "log.h"
+#include "util.h"
 #include "workspace.h"
 #include "commands.h"
 #include "container.h"
@@ -24,6 +25,7 @@
 #include "resize.h"
 #include "input_state.h"
 #include "criteria.h"
+#include "ipc-server.h"
 
 typedef struct cmd_results *sway_cmd(int argc, char **argv);
 
@@ -32,6 +34,9 @@ struct cmd_handler {
 	sway_cmd *handle;
 };
 
+static sway_cmd cmd_assign;
+static sway_cmd cmd_bar;
+static sway_cmd cmd_bindcode;
 static sway_cmd cmd_bindsym;
 static sway_cmd cmd_debuglog;
 static sway_cmd cmd_exec;
@@ -58,29 +63,43 @@ static sway_cmd cmd_scratchpad;
 static sway_cmd cmd_set;
 static sway_cmd cmd_split;
 static sway_cmd cmd_splith;
+static sway_cmd cmd_splitt;
 static sway_cmd cmd_splitv;
 static sway_cmd cmd_sticky;
 static sway_cmd cmd_workspace;
 static sway_cmd cmd_ws_auto_back_and_forth;
 
+static sway_cmd bar_cmd_binding_mode_indicator;
+static sway_cmd bar_cmd_bindsym;
+static sway_cmd bar_cmd_colors;
+static sway_cmd bar_cmd_font;
+static sway_cmd bar_cmd_mode;
+static sway_cmd bar_cmd_modifier;
+static sway_cmd bar_cmd_output;
+static sway_cmd bar_cmd_height;
+static sway_cmd bar_cmd_hidden_state;
+static sway_cmd bar_cmd_id;
+static sway_cmd bar_cmd_position;
+static sway_cmd bar_cmd_separator_symbol;
+static sway_cmd bar_cmd_status_command;
+static sway_cmd bar_cmd_strip_workspace_numbers;
+static sway_cmd bar_cmd_swaybar_command;
+static sway_cmd bar_cmd_tray_output;
+static sway_cmd bar_cmd_tray_padding;
+static sway_cmd bar_cmd_workspace_buttons;
+
+static sway_cmd bar_colors_cmd_active_workspace;
+static sway_cmd bar_colors_cmd_background;
+static sway_cmd bar_colors_cmd_background;
+static sway_cmd bar_colors_cmd_binding_mode;
+static sway_cmd bar_colors_cmd_focused_workspace;
+static sway_cmd bar_colors_cmd_inactive_workspace;
+static sway_cmd bar_colors_cmd_separator;
+static sway_cmd bar_colors_cmd_statusline;
+static sway_cmd bar_colors_cmd_urgent_workspace;
+
 swayc_t *sp_view;
 int sp_index = 0;
-
-static struct modifier_key {
-	char *name;
-	uint32_t mod;
-} modifiers[] = {
-	{ XKB_MOD_NAME_SHIFT, WLC_BIT_MOD_SHIFT },
-	{ XKB_MOD_NAME_CAPS, WLC_BIT_MOD_CAPS },
-	{ XKB_MOD_NAME_CTRL, WLC_BIT_MOD_CTRL },
-	{ "Ctrl", WLC_BIT_MOD_CTRL },
-	{ XKB_MOD_NAME_ALT, WLC_BIT_MOD_ALT },
-	{ "Alt", WLC_BIT_MOD_ALT },
-	{ XKB_MOD_NAME_NUM, WLC_BIT_MOD_MOD2 },
-	{ "Mod3", WLC_BIT_MOD_MOD3 },
-	{ XKB_MOD_NAME_LOGO, WLC_BIT_MOD_LOGO },
-	{ "Mod5", WLC_BIT_MOD_MOD5 },
-};
 
 static char *bg_options[] = {
 	"stretch",
@@ -136,6 +155,49 @@ static struct cmd_results *checkarg(int argc, const char *name, enum expected_ar
 	return error;
 }
 
+static struct cmd_results *cmd_assign(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "assign", EXPECTED_AT_LEAST, 2))) {
+		return error;
+	}
+
+	char *criteria = *argv++;
+
+	if (strncmp(*argv, "→", 1) == 0) {
+		argv++;
+	}
+
+	char *movecmd = "move container to workspace ";
+	int arglen = strlen(*argv);
+	char *cmdlist = calloc(1, sizeof(movecmd) + arglen);
+
+	sprintf(cmdlist, "%s%s", movecmd, *argv);
+
+	struct criteria *crit = malloc(sizeof(struct criteria));
+	crit->crit_raw = strdup(criteria);
+	crit->cmdlist = cmdlist;
+	crit->tokens = create_list();
+	char *err_str = extract_crit_tokens(crit->tokens, crit->crit_raw);
+
+	if (err_str) {
+		error = cmd_results_new(CMD_INVALID, "assign", err_str);
+		free(err_str);
+		free_criteria(crit);
+	} else if (crit->tokens->length == 0) {
+		error = cmd_results_new(CMD_INVALID, "assign", "Found no name/value pairs in criteria");
+		free_criteria(crit);
+	} else if (list_seq_find(config->criteria, criteria_cmp, crit) != -1) {
+		sway_log(L_DEBUG, "assign: Duplicate, skipping.");
+		free_criteria(crit);
+	} else {
+		sway_log(L_DEBUG, "assign: '%s' -> '%s' added", crit->crit_raw, crit->cmdlist);
+		list_add(config->criteria, crit);
+	}
+	return error ? error : cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+int binding_order = 0;
+
 static struct cmd_results *cmd_bindsym(int argc, char **argv) {
 	struct cmd_results *error = NULL;
 	if ((error = checkarg(argc, "bindsym", EXPECTED_MORE_THAN, 1))) {
@@ -144,24 +206,36 @@ static struct cmd_results *cmd_bindsym(int argc, char **argv) {
 		return cmd_results_new(CMD_FAILURE, "bindsym", "Can only be used in config file.");
 	}
 
+
 	struct sway_binding *binding = malloc(sizeof(struct sway_binding));
 	binding->keys = create_list();
 	binding->modifiers = 0;
+	binding->release = false;
+	binding->bindcode = false;
+
+	// Handle --release
+	if (strcmp("--release", argv[0]) == 0) {
+		if (argc >= 3) {
+			binding->release = true;
+			argv++;
+			argc--;
+		} else {
+			return cmd_results_new(CMD_FAILURE, "bindsym",
+				"Invalid bindsym command"
+				"(expected more than 2 arguments, got %d)", argc);
+		}
+	}
+
 	binding->command = join_args(argv + 1, argc - 1);
 
 	list_t *split = split_string(argv[0], "+");
 	for (int i = 0; i < split->length; ++i) {
 		// Check for a modifier key
-		int j;
-		bool is_mod = false;
-		for (j = 0; j < (int)(sizeof(modifiers) / sizeof(struct modifier_key)); ++j) {
-			if (strcasecmp(modifiers[j].name, split->items[i]) == 0) {
-				binding->modifiers |= modifiers[j].mod;
-				is_mod = true;
-				break;
-			}
+		uint32_t mod;
+		if ((mod = get_modifier_mask_by_name(split->items[i])) > 0) {
+			binding->modifiers |= mod;
+			continue;
 		}
-		if (is_mod) continue;
 		// Check for xkb key
 		xkb_keysym_t sym = xkb_keysym_from_name(split->items[i], XKB_KEYSYM_CASE_INSENSITIVE);
 		if (!sym) {
@@ -184,10 +258,83 @@ static struct cmd_results *cmd_bindsym(int argc, char **argv) {
 		free_sway_binding(dup);
 		list_del(mode->bindings, i);
 	}
+	binding->order = binding_order++;
 	list_add(mode->bindings, binding);
-	list_sort(mode->bindings, sway_binding_cmp);
+	list_qsort(mode->bindings, sway_binding_cmp_qsort);
 
 	sway_log(L_DEBUG, "bindsym - Bound %s to command %s", argv[0], binding->command);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *cmd_bindcode(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "bindcode", EXPECTED_MORE_THAN, 1))) {
+		return error;
+	} else if (!config->reading) {
+		return cmd_results_new(CMD_FAILURE, "bindcode", "Can only be used in config file.");
+	}
+
+
+	struct sway_binding *binding = malloc(sizeof(struct sway_binding));
+	binding->keys = create_list();
+	binding->modifiers = 0;
+	binding->release = false;
+	binding->bindcode = true;
+
+	// Handle --release
+	if (strcmp("--release", argv[0]) == 0) {
+		if (argc >= 3) {
+			binding->release = true;
+			argv++;
+			argc--;
+		} else {
+			return cmd_results_new(CMD_FAILURE, "bindcode",
+				"Invalid bindcode command"
+				"(expected more than 2 arguments, got %d)", argc);
+		}
+	}
+
+	binding->command = join_args(argv + 1, argc - 1);
+
+	list_t *split = split_string(argv[0], "+");
+	for (int i = 0; i < split->length; ++i) {
+		// Check for a modifier key
+		uint32_t mod;
+		if ((mod = get_modifier_mask_by_name(split->items[i])) > 0) {
+			binding->modifiers |= mod;
+			continue;
+		}
+		// parse keycode
+		int keycode = (int)strtol(split->items[i], NULL, 10);
+		if (!xkb_keycode_is_legal_x11(keycode)) {
+			error = cmd_results_new(CMD_INVALID, "bindcode", "Invalid keycode '%s'", (char *)split->items[i]);
+			free_sway_binding(binding);
+			list_free(split);
+			return error;
+		}
+		xkb_keycode_t *key = malloc(sizeof(xkb_keycode_t));
+		*key = keycode;
+		list_add(binding->keys, key);
+	}
+	free_flat_list(split);
+
+	struct sway_mode *mode = config->current_mode;
+	int i = list_seq_find(mode->bindings, sway_binding_cmp_keys, binding);
+	if (i > -1) {
+		struct sway_binding *dup = mode->bindings->items[i];
+		if (dup->bindcode) {
+			sway_log(L_DEBUG, "bindcode - '%s' already exists, overwriting", argv[0]);
+		} else {
+			sway_log(L_DEBUG, "bindcode - '%s' already exists as bindsym, overwriting", argv[0]);
+		}
+		free_sway_binding(dup);
+		list_del(mode->bindings, i);
+	}
+	binding->order = binding_order++;
+	list_add(mode->bindings, binding);
+	list_qsort(mode->bindings, sway_binding_cmp_qsort);
+
+	sway_log(L_DEBUG, "bindcode - Bound %s to command %s", argv[0], binding->command);
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
 }
 
@@ -283,12 +430,6 @@ static struct cmd_results *cmd_exec(int argc, char **argv) {
 	return cmd_exec_always(argc, argv);
 }
 
-static void kill_views(swayc_t *container, void *data) {
-	if (container->type == C_VIEW) {
-		wlc_view_close(container->handle);
-	}
-}
-
 static struct cmd_results *cmd_exit(int argc, char **argv) {
 	struct cmd_results *error = NULL;
 	if (config->reading) return cmd_results_new(CMD_FAILURE, "exit", "Can't be used in config file.");
@@ -296,7 +437,7 @@ static struct cmd_results *cmd_exit(int argc, char **argv) {
 		return error;
 	}
 	// Close all views
-	container_map(&root_container, kill_views, NULL);
+	close_views(&root_container);
 	sway_terminate();
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
 }
@@ -375,25 +516,34 @@ static struct cmd_results *cmd_floating(int argc, char **argv) {
 
 static struct cmd_results *cmd_floating_mod(int argc, char **argv) {
 	struct cmd_results *error = NULL;
-	if ((error = checkarg(argc, "floating_modifier", EXPECTED_EQUAL_TO, 1))) {
+	if ((error = checkarg(argc, "floating_modifier", EXPECTED_AT_LEAST, 1))) {
 		return error;
 	}
-	int i, j;
+	int i;
 	list_t *split = split_string(argv[0], "+");
 	config->floating_mod = 0;
 
-	// set modifer keys
+	// set modifier keys
 	for (i = 0; i < split->length; ++i) {
-		for (j = 0; j < (int)(sizeof(modifiers) / sizeof(struct modifier_key)); ++j) {
-			if (strcasecmp(modifiers[j].name, split->items[i]) == 0) {
-				config->floating_mod |= modifiers[j].mod;
-			}
-		}
+		config->floating_mod |= get_modifier_mask_by_name(split->items[i]);
 	}
 	free_flat_list(split);
 	if (!config->floating_mod) {
 		error = cmd_results_new(CMD_INVALID, "floating_modifier", "Unknown keys %s", argv[0]);
 		return error;
+	}
+
+	if (argc >= 2) {
+		if (strcasecmp("inverse", argv[1]) == 0) {
+			config->dragging_key = M_RIGHT_CLICK;
+			config->resizing_key = M_LEFT_CLICK;
+		} else if (strcasecmp("normal", argv[1]) == 0) {
+			config->dragging_key = M_LEFT_CLICK;
+			config->resizing_key = M_RIGHT_CLICK;
+		} else {
+			error = cmd_results_new(CMD_INVALID, "floating_modifier", "Invalid definition %s", argv[1]);
+			return error;
+		}
 	}
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
 }
@@ -559,6 +709,10 @@ static struct cmd_results *cmd_mode(int argc, char **argv) {
 	free(mode_name);
 	// Set current mode
 	config->current_mode = mode;
+	if (!mode_make) {
+		// trigger IPC mode event
+		ipc_event_mode(config->current_mode->name);
+	}
 	return cmd_results_new(mode_make ? CMD_BLOCK_MODE : CMD_SUCCESS, NULL, NULL);
 }
 
@@ -606,12 +760,15 @@ static struct cmd_results *cmd_move(int argc, char **argv) {
 			}
 
 			const char *ws_name = argv[3];
-			if (argc == 5) {
+			swayc_t *ws;
+			if (argc == 5 && strcasecmp(ws_name, "number") == 0) {
 				// move "container to workspace number x"
 				ws_name = argv[4];
+				ws = workspace_by_number(ws_name);
+			} else {
+				ws = workspace_by_name(ws_name);
 			}
 
-			swayc_t *ws = workspace_by_name(ws_name);
 			if (ws == NULL) {
 				ws = workspace_create(ws_name);
 			}
@@ -1048,6 +1205,15 @@ static struct cmd_results *cmd_reload(int argc, char **argv) {
 	}
 	if (!load_config(NULL)) return cmd_results_new(CMD_FAILURE, "reload", "Error(s) reloading config.");
 
+	int i;
+	swayc_t *cont = NULL;
+	for (i = 0; i < root_container.children->length; ++i) {
+		cont = root_container.children->items[i];
+		if (cont->type == C_OUTPUT) {
+			load_swaybars(cont, i);
+		}
+	}
+
 	arrange_windows(&root_container, -1, -1);
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
 }
@@ -1084,6 +1250,51 @@ static struct cmd_results *cmd_resize(int argc, char **argv) {
 			"Expected 'resize <shrink|grow> <width|height> <amount>'");
 	}
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *cmd_bar(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "bar", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+
+	if (config->reading && strcmp("{", argv[0]) != 0) {
+		return cmd_results_new(CMD_INVALID, "bar",
+				"Expected '{' at start of bar config definition.");
+	}
+
+	if (!config->reading) {
+		if (argc > 1) {
+			if (strcasecmp("mode", argv[0]) == 0) {
+				return bar_cmd_mode(argc-1, argv + 1);
+			}
+
+			if (strcasecmp("hidden_state", argv[0]) == 0) {
+				return bar_cmd_hidden_state(argc-1, argv + 1);
+			}
+		}
+
+		return cmd_results_new(CMD_FAILURE, "bar", "Can only be used in config file.");
+	}
+
+	// Create new bar with default values
+	struct bar_config *bar = default_bar_config();
+
+	// set bar id
+	int i;
+	for (i = 0; i < config->bars->length; ++i) {
+		if (bar == config->bars->items[i]) {
+			const int len = 5 + numlen(i); // "bar-" + i + \0
+			bar->id = malloc(len * sizeof(char));
+			snprintf(bar->id, len, "bar-%d", i);
+			break;
+		}
+	}
+
+	// Set current bar
+	config->current_bar = bar;
+	sway_log(L_DEBUG, "Configuring bar %s", bar->id);
+	return cmd_results_new(CMD_BLOCK_BAR, NULL, NULL);
 }
 
 static swayc_t *fetch_view_from_scratchpad() {
@@ -1161,9 +1372,9 @@ static struct cmd_results *cmd_scratchpad(int argc, char **argv) {
 }
 
 // sort in order of longest->shortest
-static int compare_set(const void *_l, const void *_r) {
-	struct sway_variable const *l = _l;
-	struct sway_variable const *r = _r;
+static int compare_set_qsort(const void *_l, const void *_r) {
+	struct sway_variable const *l = *(void **)_l;
+	struct sway_variable const *r = *(void **)_r;
 	return strlen(r->name) - strlen(l->name);
 }
 
@@ -1190,7 +1401,7 @@ static struct cmd_results *cmd_set(int argc, char **argv) {
 		var = malloc(sizeof(struct sway_variable));
 		var->name = strdup(argv[0]);
 		list_add(config->symbols, var);
-		list_sort(config->symbols, compare_set);
+		list_qsort(config->symbols, compare_set_qsort);
 	}
 	var->value = join_args(argv + 1, argc - 1);
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
@@ -1241,6 +1452,13 @@ static struct cmd_results *cmd_split(int argc, char **argv) {
 		_do_split(argc - 1, argv + 1, L_VERT);
 	} else if (strcasecmp(argv[0], "h") == 0 || strcasecmp(argv[0], "horizontal") == 0) {
 		_do_split(argc - 1, argv + 1, L_HORIZ);
+	} else if (strcasecmp(argv[0], "t") == 0 || strcasecmp(argv[0], "toggle") == 0) {
+		swayc_t *focused = get_focused_container(&root_container);
+		if (focused->parent->layout == L_VERT) {
+			_do_split(argc - 1, argv + 1, L_HORIZ);
+		} else {
+			_do_split(argc - 1, argv + 1, L_VERT);
+		}
 	} else {
 		error = cmd_results_new(CMD_FAILURE, "split",
 			"Invalid split command (expected either horiziontal or vertical).");
@@ -1255,6 +1473,15 @@ static struct cmd_results *cmd_splitv(int argc, char **argv) {
 
 static struct cmd_results *cmd_splith(int argc, char **argv) {
 	return _do_split(argc, argv, L_HORIZ);
+}
+
+static struct cmd_results *cmd_splitt(int argc, char **argv) {
+	swayc_t *focused = get_focused_container(&root_container);
+	if (focused->parent->layout == L_VERT) {
+		return _do_split(argc, argv, L_HORIZ);
+	} else {
+		return _do_split(argc, argv, L_VERT);
+	}
 }
 
 static struct cmd_results *cmd_sticky(int argc, char **argv) {
@@ -1336,15 +1563,21 @@ static struct cmd_results *cmd_fullscreen(int argc, char **argv) {
 		return error;
 	}
 	swayc_t *container = get_focused_view(&root_container);
+	if(container->type != C_VIEW){
+		return cmd_results_new(CMD_INVALID, "fullscreen", "Only views can fullscreen");
+	}
+	swayc_t *workspace = swayc_parent_by_type(container, C_WORKSPACE);
 	bool current = swayc_is_fullscreen(container);
 	wlc_view_set_state(container->handle, WLC_BIT_FULLSCREEN, !current);
 	// Resize workspace if going from  fullscreen -> notfullscreen
 	// otherwise just resize container
-	if (current) {
-		container = swayc_parent_by_type(container, C_WORKSPACE);
+	if (!current) {
+		arrange_windows(workspace, -1, -1);
+		workspace->fullscreen = container;
+	} else {
+		arrange_windows(container, -1, -1);
+		workspace->fullscreen = NULL;
 	}
-	// Only resize container when going into fullscreen
-	arrange_windows(container, -1, -1);
 
 	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
 }
@@ -1354,13 +1587,17 @@ static struct cmd_results *cmd_workspace(int argc, char **argv) {
 	if ((error = checkarg(argc, "workspace", EXPECTED_AT_LEAST, 1))) {
 		return error;
 	}
-	if (argc == 1) {
+	if (argc == 1 || (argc == 2 && strcasecmp(argv[0], "number") == 0) ) {
 		if (config->reading || !config->active) {
 			return cmd_results_new(CMD_DEFER, "workspace", NULL);
 		}
 		// Handle workspace next/prev
 		swayc_t *ws = NULL;
-		if (strcasecmp(argv[0], "next") == 0) {
+		if (argc == 2) {
+			if (!(ws=workspace_by_number(argv[1]))) {
+				ws = workspace_create(argv[1]);
+			}
+		}else if (strcasecmp(argv[0], "next") == 0) {
 			ws = workspace_next();
 		} else if (strcasecmp(argv[0], "prev") == 0) {
 			ws = workspace_prev();
@@ -1430,6 +1667,9 @@ static struct cmd_results *cmd_ws_auto_back_and_forth(int argc, char **argv) {
 
 /* Keep alphabetized */
 static struct cmd_handler handlers[] = {
+	{ "assign", cmd_assign },
+	{ "bar", cmd_bar },
+	{ "bindcode", cmd_bindcode },
 	{ "bindsym", cmd_bindsym },
 	{ "debuglog", cmd_debuglog },
 	{ "default_orientation", cmd_orientation },
@@ -1457,29 +1697,740 @@ static struct cmd_handler handlers[] = {
 	{ "set", cmd_set },
 	{ "split", cmd_split },
 	{ "splith", cmd_splith },
+	{ "splitt", cmd_splitt },
 	{ "splitv", cmd_splitv },
 	{ "sticky", cmd_sticky },
 	{ "workspace", cmd_workspace },
 	{ "workspace_auto_back_and_forth", cmd_ws_auto_back_and_forth },
 };
 
+static struct cmd_results *bar_cmd_binding_mode_indicator(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "binding_mode_indicator", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "binding_mode_indicator", "No bar defined.");
+	}
+
+	if (strcasecmp("yes", argv[0]) == 0) {
+		config->current_bar->binding_mode_indicator = true;
+		sway_log(L_DEBUG, "Enabling binding mode indicator on bar: %s", config->current_bar->id);
+	} else if (strcasecmp("no", argv[0]) == 0) {
+		config->current_bar->binding_mode_indicator = false;
+		sway_log(L_DEBUG, "Disabling binding mode indicator on bar: %s", config->current_bar->id);
+	} else {
+		error = cmd_results_new(CMD_INVALID, "binding_mode_indicator", "Invalid value %s", argv[0]);
+		return error;
+	}
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_bindsym(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "bindsym", EXPECTED_MORE_THAN, 1))) {
+		return error;
+	} else if (!config->reading) {
+		return cmd_results_new(CMD_FAILURE, "bindsym", "Can only be used in config file.");
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "bindsym", "No bar defined.");
+	}
+
+	if (strlen(argv[1]) != 7) {
+		return cmd_results_new(CMD_INVALID, "bindsym", "Invalid mouse binding %s", argv[1]);
+	}
+	uint32_t numbutton = (uint32_t)atoi(argv[1] + 6);
+	if (numbutton < 1 || numbutton > 5 || strncmp(argv[1], "button", 6) != 0) {
+		return cmd_results_new(CMD_INVALID, "bindsym", "Invalid mouse binding %s", argv[1]);
+	}
+	struct sway_mouse_binding *binding = malloc(sizeof(struct sway_mouse_binding));
+	binding->button = numbutton;
+	binding->command = join_args(argv + 1, argc - 1);
+
+	struct bar_config *bar = config->current_bar;
+	int i = list_seq_find(bar->bindings, sway_mouse_binding_cmp_buttons, binding);
+	if (i > -1) {
+		sway_log(L_DEBUG, "bindsym - '%s' for swaybar already exists, overwriting", argv[0]);
+		struct sway_mouse_binding *dup = bar->bindings->items[i];
+		free_sway_mouse_binding(dup);
+		list_del(bar->bindings, i);
+	}
+	list_add(bar->bindings, binding);
+	list_qsort(bar->bindings, sway_mouse_binding_cmp_qsort);
+
+	sway_log(L_DEBUG, "bindsym - Bound %s to command %s when clicking swaybar", argv[0], binding->command);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_colors(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "colors", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (strcmp("{", argv[0]) != 0) {
+		return cmd_results_new(CMD_INVALID, "colors",
+				"Expected '{' at the start of colors config definition.");
+	}
+
+	return cmd_results_new(CMD_BLOCK_BAR_COLORS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_font(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "font", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "font", "No bar defined.");
+	}
+
+	char *font = join_args(argv, argc);
+	if (strlen(font) > 6 && strncmp("pango:", font, 6) == 0) {
+		free(config->current_bar->font);
+		config->current_bar->font = font;
+		sway_log(L_DEBUG, "Settings font '%s' for bar: %s", config->current_bar->font, config->current_bar->id);
+	} else {
+		sway_log(L_ERROR, "warning: non-pango font '%s' not supported.", font);
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_height(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "height", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	int height = atoi(argv[0]);
+	if (height < 0) {
+		return cmd_results_new(CMD_INVALID, "height",
+				"Invalid height value: %s", argv[0]);
+	}
+
+	config->current_bar->height = height;
+	sway_log(L_DEBUG, "Setting bar height to %d on bar: %s", height, config->current_bar->id);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_set_hidden_state(struct bar_config *bar, const char *hidden_state) {
+	char *old_state = bar->hidden_state;
+	if (strcasecmp("toggle", hidden_state) == 0 && !config->reading) {
+		if (strcasecmp("hide", bar->hidden_state) == 0) {
+			bar->hidden_state = strdup("show");
+		} else if (strcasecmp("show", bar->hidden_state) == 0) {
+			bar->hidden_state = strdup("hide");
+		}
+	} else if (strcasecmp("hide", hidden_state) == 0) {
+		bar->hidden_state = strdup("hide");
+	} else if (strcasecmp("show", hidden_state) == 0) {
+		bar->hidden_state = strdup("show");
+	} else {
+		return cmd_results_new(CMD_INVALID, "hidden_state", "Invalid value %s", hidden_state);
+	}
+
+	if (strcmp(old_state, bar->hidden_state) != 0) {
+		if (!config->reading) {
+			ipc_event_barconfig_update(bar);
+		}
+		sway_log(L_DEBUG, "Setting hidden_state: '%s' for bar: %s", bar->hidden_state, bar->id);
+	}
+
+	// free old mode
+	free(old_state);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+
+static struct cmd_results *bar_cmd_hidden_state(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "hidden_state", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+	if ((error = checkarg(argc, "hidden_state", EXPECTED_LESS_THAN, 3))) {
+		return error;
+	}
+
+	if (config->reading && argc > 1) {
+		return cmd_results_new(CMD_INVALID, "hidden_state", "Unexpected value %s in config mode", argv[1]);
+	}
+
+	const char *state = argv[0];
+
+	if (config->reading) {
+		return bar_set_hidden_state(config->current_bar, state);
+	}
+
+	const char *id = NULL;
+	if (argc == 2) {
+		id = argv[1];
+	}
+
+	int i;
+	struct bar_config *bar;
+	for (i = 0; i < config->bars->length; ++i) {
+		bar = config->bars->items[i];
+		if (id && strcmp(id, bar->id) == 0) {
+			return bar_set_hidden_state(bar, state);
+		}
+
+		error = bar_set_hidden_state(bar, state);
+		if (error) {
+			return error;
+		}
+	}
+
+	// active bar modifiers might have changed.
+	update_active_bar_modifiers();
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_set_mode(struct bar_config *bar, const char *mode) {
+	char *old_mode = bar->mode;
+	if (strcasecmp("toggle", mode) == 0 && !config->reading) {
+		if (strcasecmp("dock", bar->mode) == 0) {
+			bar->mode = strdup("hide");
+		} else if (strcasecmp("hide", bar->mode) == 0) {
+			bar->mode = strdup("dock");
+		}
+	} else if (strcasecmp("dock", mode) == 0) {
+		bar->mode = strdup("dock");
+	} else if (strcasecmp("hide", mode) == 0) {
+		bar->mode = strdup("hide");
+	} else if (strcasecmp("invisible", mode) == 0) {
+		bar->mode = strdup("invisible");
+	} else {
+		return cmd_results_new(CMD_INVALID, "mode", "Invalid value %s", mode);
+	}
+
+	if (strcmp(old_mode, bar->mode) != 0) {
+		if (!config->reading) {
+			ipc_event_barconfig_update(bar);
+
+			// active bar modifiers might have changed.
+			update_active_bar_modifiers();
+		}
+		sway_log(L_DEBUG, "Setting mode: '%s' for bar: %s", bar->mode, bar->id);
+	}
+
+	// free old mode
+	free(old_mode);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_mode(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "mode", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+	if ((error = checkarg(argc, "mode", EXPECTED_LESS_THAN, 3))) {
+		return error;
+	}
+
+	if (config->reading && argc > 1) {
+		return cmd_results_new(CMD_INVALID, "mode", "Unexpected value %s in config mode", argv[1]);
+	}
+
+	const char *mode = argv[0];
+
+	if (config->reading) {
+		return bar_set_mode(config->current_bar, mode);
+	}
+
+	const char *id = NULL;
+	if (argc == 2) {
+		id = argv[1];
+	}
+
+	int i;
+	struct bar_config *bar;
+	for (i = 0; i < config->bars->length; ++i) {
+		bar = config->bars->items[i];
+		if (id && strcmp(id, bar->id) == 0) {
+			return bar_set_mode(bar, mode);
+		}
+
+		error = bar_set_mode(bar, mode);
+		if (error) {
+			return error;
+		}
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_id(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "id", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	const char *name = argv[0];
+	const char *oldname = config->current_bar->id;
+
+	// check if id is used by a previously defined bar
+	int i;
+	for (i = 0; i < config->bars->length; ++i) {
+		struct bar_config *find = config->bars->items[i];
+		if (strcmp(name, find->id) == 0 && config->current_bar != find) {
+			return cmd_results_new(CMD_FAILURE, "id",
+					"Id '%s' already defined for another bar. Id unchanged (%s).",
+					name, oldname);
+		}
+	}
+
+	sway_log(L_DEBUG, "Renaming bar: '%s' to '%s'", oldname, name);
+
+	// free old bar id
+	free(config->current_bar->id);
+
+	config->current_bar->id = strdup(name);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_modifier(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "modifier", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "modifier", "No bar defined.");
+	}
+
+	uint32_t mod = 0;
+
+	list_t *split = split_string(argv[0], "+");
+	for (int i = 0; i < split->length; ++i) {
+		uint32_t tmp_mod;
+		if ((tmp_mod = get_modifier_mask_by_name(split->items[i])) > 0) {
+			mod |= tmp_mod;
+			continue;
+		} else {
+			free_flat_list(split);
+			return cmd_results_new(CMD_INVALID, "modifier", "Unknown modifier '%s'", split->items[i]);
+		}
+	}
+	free_flat_list(split);
+
+	config->current_bar->modifier = mod;
+	sway_log(L_DEBUG, "Show/Hide the bar when pressing '%s' in hide mode.", argv[0]);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_output(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "output", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "output", "No bar defined.");
+	}
+
+	const char *output = argv[0];
+	list_t *outputs = config->current_bar->outputs;
+	if (!outputs) {
+		outputs = create_list();
+		config->current_bar->outputs = outputs;
+	}
+
+	int i;
+	int add_output = 1;
+	if (strcmp("*", output) == 0) {
+		// remove all previous defined outputs and replace with '*'
+		for (i = 0; i < outputs->length; ++i) {
+			free(outputs->items[i]);
+			list_del(outputs, i);
+		}
+	} else {
+		// only add output if not already defined with either the same
+		// name or as '*'
+		for (i = 0; i < outputs->length; ++i) {
+			const char *find = outputs->items[i];
+			if (strcmp("*", find) == 0 || strcmp(output, find) == 0) {
+				add_output = 0;
+				break;
+			}
+		}
+	}
+
+	if (add_output) {
+		list_add(outputs, strdup(output));
+		sway_log(L_DEBUG, "Adding bar: '%s' to output '%s'", config->current_bar->id, output);
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_position(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "position", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "position", "No bar defined.");
+	}
+
+	if (strcasecmp("top", argv[0]) == 0) {
+		config->current_bar->position = DESKTOP_SHELL_PANEL_POSITION_TOP;
+	} else if (strcasecmp("bottom", argv[0]) == 0) {
+		config->current_bar->position = DESKTOP_SHELL_PANEL_POSITION_BOTTOM;
+	} else if (strcasecmp("left", argv[0]) == 0) {
+		config->current_bar->position = DESKTOP_SHELL_PANEL_POSITION_LEFT;
+	} else if (strcasecmp("right", argv[0]) == 0) {
+		config->current_bar->position = DESKTOP_SHELL_PANEL_POSITION_RIGHT;
+	} else {
+		error = cmd_results_new(CMD_INVALID, "position", "Invalid value %s", argv[0]);
+		return error;
+	}
+
+	sway_log(L_DEBUG, "Setting bar position '%s' for bar: %s", argv[0], config->current_bar->id);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_separator_symbol(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "separator_symbol", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "separator_symbol", "No bar defined.");
+	}
+
+	free(config->current_bar->separator_symbol);
+	config->current_bar->separator_symbol = strdup(argv[0]);
+	sway_log(L_DEBUG, "Settings separator_symbol '%s' for bar: %s", config->current_bar->separator_symbol, config->current_bar->id);
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_status_command(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "status_command", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "status_command", "No bar defined.");
+	}
+
+	free(config->current_bar->status_command);
+	config->current_bar->status_command = join_args(argv, argc);
+	sway_log(L_DEBUG, "Feeding bar with status command: %s", config->current_bar->status_command);
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_strip_workspace_numbers(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "strip_workspace_numbers", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "strip_workspace_numbers", "No bar defined.");
+	}
+
+	if (strcasecmp("yes", argv[0]) == 0) {
+		config->current_bar->strip_workspace_numbers = true;
+		sway_log(L_DEBUG, "Stripping workspace numbers on bar: %s", config->current_bar->id);
+	} else if (strcasecmp("no", argv[0]) == 0) {
+		config->current_bar->strip_workspace_numbers = false;
+		sway_log(L_DEBUG, "Enabling workspace numbers on bar: %s", config->current_bar->id);
+	} else {
+		error = cmd_results_new(CMD_INVALID, "strip_workspace_numbers", "Invalid value %s", argv[0]);
+		return error;
+	}
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_swaybar_command(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "swaybar_command", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "swaybar_command", "No bar defined.");
+	}
+
+	free(config->current_bar->swaybar_command);
+	config->current_bar->swaybar_command = join_args(argv, argc);
+	sway_log(L_DEBUG, "Using custom swaybar command: %s", config->current_bar->swaybar_command);
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_tray_output(int argc, char **argv) {
+	sway_log(L_ERROR, "warning: tray_output is not supported on wayland");
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_tray_padding(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "tray_padding", EXPECTED_AT_LEAST, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "tray_padding", "No bar defined.");
+	}
+
+	int padding = atoi(argv[0]);
+	if (padding < 0) {
+		return cmd_results_new(CMD_INVALID, "tray_padding",
+				"Invalid padding value %s, minimum is 0", argv[0]);
+	}
+
+	if (argc > 1 && strcasecmp("px", argv[1]) != 0) {
+		return cmd_results_new(CMD_INVALID, "tray_padding",
+				"Unknown unit %s", argv[1]);
+	}
+	config->current_bar->tray_padding = padding;
+	sway_log(L_DEBUG, "Enabling tray padding of %d px on bar: %s", padding, config->current_bar->id);
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_cmd_workspace_buttons(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "workspace_buttons", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if (!config->current_bar) {
+		return cmd_results_new(CMD_FAILURE, "workspace_buttons", "No bar defined.");
+	}
+
+	if (strcasecmp("yes", argv[0]) == 0) {
+		config->current_bar->workspace_buttons = true;
+		sway_log(L_DEBUG, "Enabling workspace buttons on bar: %s", config->current_bar->id);
+	} else if (strcasecmp("no", argv[0]) == 0) {
+		config->current_bar->workspace_buttons = false;
+		sway_log(L_DEBUG, "Disabling workspace buttons on bar: %s", config->current_bar->id);
+	} else {
+		error = cmd_results_new(CMD_INVALID, "workspace_buttons", "Invalid value %s", argv[0]);
+		return error;
+	}
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
 static struct cmd_handler bar_handlers[] = {
-	{ "binding_mode_indicator", NULL },
-	{ "bindsym", NULL },
-	{ "colors", NULL },
-	{ "font", NULL },
-	{ "hidden_state", NULL },
-	{ "id", NULL },
-	{ "mode", NULL },
-	{ "modifier", NULL },
-	{ "output", NULL },
-	{ "position", NULL },
-	{ "seperator_symbol", NULL },
-	{ "status_command", NULL },
-	{ "strip_workspace_numbers", NULL },
-	{ "tray_output", NULL },
-	{ "tray_padding", NULL },
-	{ "workspace_buttons", NULL },
+	{ "binding_mode_indicator", bar_cmd_binding_mode_indicator },
+	{ "bindsym", bar_cmd_bindsym },
+	{ "colors", bar_cmd_colors },
+	{ "font", bar_cmd_font },
+	{ "height", bar_cmd_height },
+	{ "hidden_state", bar_cmd_hidden_state },
+	{ "id", bar_cmd_id },
+	{ "mode", bar_cmd_mode },
+	{ "modifier", bar_cmd_modifier },
+	{ "output", bar_cmd_output },
+	{ "position", bar_cmd_position },
+	{ "separator_symbol", bar_cmd_separator_symbol },
+	{ "status_command", bar_cmd_status_command },
+	{ "strip_workspace_numbers", bar_cmd_strip_workspace_numbers },
+	{ "swaybar_command", bar_cmd_swaybar_command },
+	{ "tray_output", bar_cmd_tray_output },
+	{ "tray_padding", bar_cmd_tray_padding },
+	{ "workspace_buttons", bar_cmd_workspace_buttons },
+};
+
+/**
+ * Check and add color to buffer.
+ *
+ * return error object, or NULL if color is valid.
+ */
+static struct cmd_results *add_color(const char *name, char *buffer, const char *color) {
+	int len = strlen(color);
+	if (len != 7 && len != 9 ) {
+		return cmd_results_new(CMD_INVALID, name, "Invalid color definition %s", color);
+	}
+
+	if (color[0] != '#') {
+		return cmd_results_new(CMD_INVALID, name, "Invalid color definition %s", color);
+	}
+
+	int i;
+	for (i = 1; i < len; ++i) {
+		if (!isxdigit(color[i])) {
+			return cmd_results_new(CMD_INVALID, name, "Invalid color definition %s", color);
+		}
+	}
+
+	// copy color to buffer
+	strncpy(buffer, color, len);
+	// add default alpha channel if color was defined without it
+	if (len == 7) {
+		buffer[7] = 'f';
+		buffer[8] = 'f';
+	}
+	sway_log(L_DEBUG, "Setting %s color %s for bar: %s", name, buffer, config->current_bar->id);
+
+	return NULL;
+}
+
+static struct cmd_results *bar_colors_cmd_active_workspace(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "active_workspace", EXPECTED_EQUAL_TO, 3))) {
+		return error;
+	}
+
+	if ((error = add_color("active_workspace_border", config->current_bar->colors.active_workspace_border, argv[0]))) {
+		return error;
+	}
+
+	if ((error = add_color("active_workspace_bg", config->current_bar->colors.active_workspace_bg, argv[1]))) {
+		return error;
+	}
+
+	if ((error = add_color("active_workspace_text", config->current_bar->colors.active_workspace_text, argv[2]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_background(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "background", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if ((error = add_color("background", config->current_bar->colors.background, argv[0]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_binding_mode(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "binding_mode", EXPECTED_EQUAL_TO, 3))) {
+		return error;
+	}
+
+	if ((error = add_color("binding_mode_border", config->current_bar->colors.binding_mode_border, argv[0]))) {
+		return error;
+	}
+
+	if ((error = add_color("binding_mode_bg", config->current_bar->colors.binding_mode_bg, argv[1]))) {
+		return error;
+	}
+
+	if ((error = add_color("binding_mode_text", config->current_bar->colors.binding_mode_text, argv[2]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_focused_workspace(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "focused_workspace", EXPECTED_EQUAL_TO, 3))) {
+		return error;
+	}
+
+	if ((error = add_color("focused_workspace_border", config->current_bar->colors.focused_workspace_border, argv[0]))) {
+		return error;
+	}
+
+	if ((error = add_color("focused_workspace_bg", config->current_bar->colors.focused_workspace_bg, argv[1]))) {
+		return error;
+	}
+
+	if ((error = add_color("focused_workspace_text", config->current_bar->colors.focused_workspace_text, argv[2]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_inactive_workspace(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "inactive_workspace", EXPECTED_EQUAL_TO, 3))) {
+		return error;
+	}
+
+	if ((error = add_color("inactive_workspace_border", config->current_bar->colors.inactive_workspace_border, argv[0]))) {
+		return error;
+	}
+
+	if ((error = add_color("inactive_workspace_bg", config->current_bar->colors.inactive_workspace_bg, argv[1]))) {
+		return error;
+	}
+
+	if ((error = add_color("inactive_workspace_text", config->current_bar->colors.inactive_workspace_text, argv[2]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_separator(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "separator", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if ((error = add_color("separator", config->current_bar->colors.separator, argv[0]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_statusline(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "statusline", EXPECTED_EQUAL_TO, 1))) {
+		return error;
+	}
+
+	if ((error = add_color("statusline", config->current_bar->colors.statusline, argv[0]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_results *bar_colors_cmd_urgent_workspace(int argc, char **argv) {
+	struct cmd_results *error = NULL;
+	if ((error = checkarg(argc, "urgent_workspace", EXPECTED_EQUAL_TO, 3))) {
+		return error;
+	}
+
+	if ((error = add_color("urgent_workspace_border", config->current_bar->colors.urgent_workspace_border, argv[0]))) {
+		return error;
+	}
+
+	if ((error = add_color("urgent_workspace_bg", config->current_bar->colors.urgent_workspace_bg, argv[1]))) {
+		return error;
+	}
+
+	if ((error = add_color("urgent_workspace_text", config->current_bar->colors.urgent_workspace_text, argv[2]))) {
+		return error;
+	}
+
+	return cmd_results_new(CMD_SUCCESS, NULL, NULL);
+}
+
+static struct cmd_handler bar_colors_handlers[] = {
+	{ "active_workspace", bar_colors_cmd_active_workspace },
+	{ "background", bar_colors_cmd_background },
+	{ "binding_mode", bar_colors_cmd_binding_mode },
+	{ "focused_workspace", bar_colors_cmd_focused_workspace },
+	{ "inactive_workspace", bar_colors_cmd_inactive_workspace },
+	{ "separator", bar_colors_cmd_separator },
+	{ "statusline", bar_colors_cmd_statusline },
+	{ "urgent_workspace", bar_colors_cmd_urgent_workspace },
 };
 
 static int handler_compare(const void *_a, const void *_b) {
@@ -1489,14 +2440,21 @@ static int handler_compare(const void *_a, const void *_b) {
 }
 
 static struct cmd_handler *find_handler(char *line, enum cmd_status block) {
-	struct cmd_handler *h = handlers;
-	if (block == CMD_BLOCK_BAR) {
-		h = bar_handlers;
-	}
 	struct cmd_handler d = { .command=line };
-	struct cmd_handler *res = bsearch(&d, h,
+	struct cmd_handler *res = NULL;
+	if (block == CMD_BLOCK_BAR) {
+		res = bsearch(&d, bar_handlers,
+			sizeof(bar_handlers) / sizeof(struct cmd_handler),
+			sizeof(struct cmd_handler), handler_compare);
+	} else if (block == CMD_BLOCK_BAR_COLORS){
+		res = bsearch(&d, bar_colors_handlers,
+			sizeof(bar_colors_handlers) / sizeof(struct cmd_handler),
+			sizeof(struct cmd_handler), handler_compare);
+	} else {
+		res = bsearch(&d, handlers,
 			sizeof(handlers) / sizeof(struct cmd_handler),
 			sizeof(struct cmd_handler), handler_compare);
+	}
 	return res;
 }
 
@@ -1557,8 +2515,11 @@ struct cmd_results *handle_command(char *_exec) {
 			//TODO better handling of argv
 			int argc;
 			char **argv = split_args(cmd, &argc);
-			if (argc>1 && (*argv[1] == '\"' || *argv[1] == '\'')) {
-				strip_quotes(argv[1]);
+			int i;
+			for (i = 1; i < argc; ++i) {
+				if (*argv[i] == '\"' || *argv[i] == '\'') {
+					strip_quotes(argv[i]);
+				}
 			}
 			struct cmd_handler *handler = find_handler(argv[0], CMD_BLOCK_END);
 			if (!handler) {
@@ -1622,13 +2583,18 @@ struct cmd_results *config_command(char *exec, enum cmd_status block) {
 	// Var replacement, for all but first argument of set
 	for (i = handler->handle == cmd_set ? 2 : 1; i < argc; ++i) {
 		argv[i] = do_var_replacement(argv[i]);
+		unescape_string(argv[i]);
 	}
 	/* Strip quotes for first argument.
 	 * TODO This part needs to be handled much better */
 	if (argc>1 && (*argv[1] == '\"' || *argv[1] == '\'')) {
 		strip_quotes(argv[1]);
 	}
-	results = handler->handle(argc-1, argv+1);
+	if (handler->handle) {
+		results = handler->handle(argc-1, argv+1);
+	} else {
+		results = cmd_results_new(CMD_INVALID, argv[0], "This command is shimmed, but unimplemented");
+	}
 	cleanup:
 	free_argv(argc, argv);
 	return results;

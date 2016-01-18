@@ -1,7 +1,7 @@
 #ifndef _SWAY_EXTENSIONS_H
 #define _SWAY_EXTENSIONS_H
 
-#include <wayland-server-core.h>
+#include <wayland-server.h>
 #include <wlc/wlc-wayland.h>
 #include "wayland-desktop-shell-server-protocol.h"
 #include "list.h"
@@ -9,19 +9,25 @@
 struct background_config {
         wlc_handle output;
         wlc_resource surface;
-        struct wl_resource *resource;
+        // we need the wl_resource of the surface in the destructor
+        struct wl_resource *wl_surface_res;
 };
 
 struct panel_config {
+        // wayland resource used in callbacks, is used to track this panel
+        struct wl_resource *wl_resource;
         wlc_handle output;
         wlc_resource surface;
-        struct wl_resource *resource;
+        // we need the wl_resource of the surface in the destructor
+        struct wl_resource *wl_surface_res;
+        enum desktop_shell_panel_position panel_position;
 };
 
 struct desktop_shell_state {
         list_t *backgrounds;
         list_t *panels;
-        enum desktop_shell_panel_position panel_position;
+        list_t *lock_surfaces;
+        bool is_locked;
         struct wlc_size panel_size;
 };
 

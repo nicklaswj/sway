@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <wordexp.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include "wayland-desktop-shell-server-protocol.h"
 #include "readline.h"
 #include "stringop.h"
@@ -38,6 +41,24 @@ static void free_mode(struct sway_mode *mode) {
 	free(mode);
 }
 
+static void free_bar(struct bar_config *bar) {
+	free(bar->mode);
+	free(bar->hidden_state);
+	free(bar->status_command);
+	free(bar->font);
+	free(bar->separator_symbol);
+	int i;
+	for (i = 0; i < bar->bindings->length; ++i) {
+		free_sway_mouse_binding(bar->bindings->items[i]);
+	}
+	list_free(bar->bindings);
+
+	if (bar->outputs) {
+		free_flat_list(bar->outputs);
+	}
+	free(bar);
+}
+
 void free_output_config(struct output_config *oc) {
 	free(oc->name);
 	free(oc);
@@ -61,6 +82,11 @@ static void free_config(struct sway_config *config) {
 	}
 	list_free(config->modes);
 
+	for (i = 0; i < config->bars->length; ++i) {
+		free_bar(config->bars->items[i]);
+	}
+	list_free(config->bars);
+
 	free_flat_list(config->cmd_queue);
 
 	for (i = 0; i < config->workspace_outputs->length; ++i) {
@@ -77,6 +103,8 @@ static void free_config(struct sway_config *config) {
 		free_output_config(config->output_configs->items[i]);
 	}
 	list_free(config->output_configs);
+
+	list_free(config->active_bar_modifiers);
 	free(config);
 }
 
@@ -88,6 +116,7 @@ static bool file_exists(const char *path) {
 static void config_defaults(struct sway_config *config) {
 	config->symbols = create_list();
 	config->modes = create_list();
+	config->bars = create_list();
 	config->workspace_outputs = create_list();
 	config->criteria = create_list();
 	config->output_configs = create_list();
@@ -101,6 +130,8 @@ static void config_defaults(struct sway_config *config) {
 	list_add(config->modes, config->current_mode);
 
 	config->floating_mod = 0;
+	config->dragging_key = M_LEFT_CLICK;
+	config->resizing_key = M_RIGHT_CLICK;
 	config->default_layout = L_NONE;
 	config->default_orientation = L_NONE;
 	// Flags
@@ -117,17 +148,32 @@ static void config_defaults(struct sway_config *config) {
 	config->gaps_inner = 0;
 	config->gaps_outer = 0;
 
-	// Bar
-	config->bar.mode = "dock";
-	config->bar.hidden_state = "hide";
-	config->bar.modifier = 0;
-	config->bar.position = DESKTOP_SHELL_PANEL_POSITION_BOTTOM;
-	config->bar.status_command = "while :; do date +'%Y-%m-%d %l:%M:%S %p' && sleep 1; done";
-	config->bar.font = "monospace 10";
-	config->bar.bar_height = -1;
-	config->bar.workspace_buttons = true;
-	config->bar.strip_workspace_numbers = false;
-	config->bar.binding_mode_indicator = true;
+	config->active_bar_modifiers = create_list();
+}
+
+static int compare_modifiers(const void *left, const void *right) {
+	uint32_t a = *(uint32_t *)left;
+	uint32_t b = *(uint32_t *)right;
+
+	return a - b;
+}
+
+void update_active_bar_modifiers() {
+	if (config->active_bar_modifiers->length > 0) {
+		list_free(config->active_bar_modifiers);
+		config->active_bar_modifiers = create_list();
+	}
+
+	struct bar_config *bar;
+	int i;
+	for (i = 0; i < config->bars->length; ++i) {
+		bar = config->bars->items[i];
+		if (strcmp(bar->mode, "hide") == 0 && strcmp(bar->hidden_state, "hide") == 0) {
+			if (list_seq_find(config->active_bar_modifiers, compare_modifiers, &bar->modifier) < 0) {
+				list_add(config->active_bar_modifiers, &bar->modifier);
+			}
+		}
+	}
 }
 
 static char *get_config_path(void) {
@@ -136,13 +182,13 @@ static char *get_config_path(void) {
 		"$XDG_CONFIG_HOME/sway/config",
 		"$HOME/.i3/config",
 		"$XDG_CONFIG_HOME/i3/config",
-                FALLBACK_CONFIG_DIR "/config",
-		"/etc/i3/config",
+		"${CMAKE_INSTALL_FULL_SYSCONFDIR}/sway/config",
+		"${CMAKE_INSTALL_FULL_SYSCONFDIR}/i3/config",
 	};
 
 	if (!getenv("XDG_CONFIG_HOME")) {
 		char *home = getenv("HOME");
-		char *config_home = malloc(strlen("home") + strlen("/.config") + 1);
+		char *config_home = malloc(strlen(home) + strlen("/.config") + 1);
 		strcpy(config_home, home);
 		strcat(config_home, "/.config");
 		setenv("XDG_CONFIG_HOME", config_home, 1);
@@ -198,6 +244,8 @@ bool load_config(const char *file) {
 	}
 	fclose(f);
 
+	update_active_bar_modifiers();
+
 	return config_load_success;
 }
 
@@ -246,11 +294,39 @@ bool read_config(FILE *file, bool is_active) {
 			}
 			break;
 
+		case CMD_BLOCK_BAR:
+			if (block == CMD_BLOCK_END) {
+				block = CMD_BLOCK_BAR;
+			} else {
+				sway_log(L_ERROR, "Invalid block '%s'", line);
+			}
+			break;
+
+		case CMD_BLOCK_BAR_COLORS:
+			if (block == CMD_BLOCK_BAR) {
+				block = CMD_BLOCK_BAR_COLORS;
+			} else {
+				sway_log(L_ERROR, "Invalid block '%s'", line);
+			}
+			break;
+
 		case CMD_BLOCK_END:
 			switch(block) {
 			case CMD_BLOCK_MODE:
 				sway_log(L_DEBUG, "End of mode block");
 				config->current_mode = config->modes->items[0];
+				block = CMD_BLOCK_END;
+				break;
+
+			case CMD_BLOCK_BAR:
+				sway_log(L_DEBUG, "End of bar block");
+				config->current_bar = NULL;
+				block = CMD_BLOCK_END;
+				break;
+
+			case CMD_BLOCK_BAR_COLORS:
+				sway_log(L_DEBUG, "End of bar colors block");
+				block = CMD_BLOCK_BAR;
 				break;
 
 			case CMD_BLOCK_END:
@@ -320,6 +396,118 @@ void merge_output_config(struct output_config *dst, struct output_config *src) {
 	}
 }
 
+static void invoke_swaybar(swayc_t *output, struct bar_config *bar, int output_i) {
+	sway_log(L_DEBUG, "Invoking swaybar for output %s[%d] and bar %s", output->name, output_i, bar->id);
+
+	size_t bufsize = 4;
+	char output_id[bufsize];
+	snprintf(output_id, bufsize, "%d", output_i);
+	output_id[bufsize-1] = 0;
+
+	pid_t *pid = malloc(sizeof(pid_t));
+	*pid = fork();
+	if (*pid == 0) {
+		if (!bar->swaybar_command) {
+			char *const cmd[] = {
+				"swaybar",
+				"-b",
+				bar->id,
+				output_id,
+				NULL,
+			};
+
+			execvp(cmd[0], cmd);
+		} else {
+			// run custom swaybar
+			int len = strlen(bar->swaybar_command) + strlen(bar->id) + strlen(output_id) + 6;
+			char *command = malloc(len * sizeof(char));
+			snprintf(command, len, "%s -b %s %s", bar->swaybar_command, bar->id, output_id);
+
+			char *const cmd[] = {
+				"sh",
+				"-c",
+				command,
+				NULL,
+			};
+
+			execvp(cmd[0], cmd);
+			free(command);
+		}
+	}
+
+	// add swaybar pid to output
+	list_add(output->bar_pids, pid);
+}
+
+void terminate_swaybars(list_t *pids) {
+	int i, ret;
+	pid_t *pid;
+	for (i = 0; i < pids->length; ++i) {
+		pid = pids->items[i];
+		ret = kill(*pid, SIGTERM);
+		if (ret != 0) {
+			sway_log(L_ERROR, "Unable to terminate swaybar [pid: %d]", *pid);
+		} else {
+			int status;
+			waitpid(*pid, &status, 0);
+		}
+	}
+
+	// empty pids list
+	for (i = 0; i < pids->length; ++i) {
+		pid = pids->items[i];
+		list_del(pids, i);
+		free(pid);
+	}
+}
+
+void terminate_swaybg(pid_t pid) {
+	int ret = kill(pid, SIGTERM);
+	if (ret != 0) {
+		sway_log(L_ERROR, "Unable to terminate swaybg [pid: %d]", pid);
+	} else {
+		int status;
+		waitpid(pid, &status, 0);
+	}
+}
+
+void load_swaybars(swayc_t *output, int output_idx) {
+	// Check for bars
+	list_t *bars = create_list();
+	struct bar_config *bar = NULL;
+	int i;
+	for (i = 0; i < config->bars->length; ++i) {
+		bar = config->bars->items[i];
+		bool apply = false;
+		if (bar->outputs) {
+			int j;
+			for (j = 0; j < bar->outputs->length; ++j) {
+				char *o = bar->outputs->items[j];
+				if (!strcmp(o, "*") || !strcasecmp(o, output->name)) {
+					apply = true;
+					break;
+				}
+			}
+		} else {
+			apply = true;
+		}
+		if (apply) {
+			list_add(bars, bar);
+		}
+	}
+
+	// terminate swaybar processes previously spawned for this
+	// output.
+	terminate_swaybars(output->bar_pids);
+
+	for (i = 0; i < bars->length; ++i) {
+		bar = bars->items[i];
+		invoke_swaybar(output, bar, output_idx);
+	}
+
+	list_free(bars);
+}
+
 void apply_output_config(struct output_config *oc, swayc_t *output) {
 	if (oc && oc->width > 0 && oc->height > 0) {
 		output->width = oc->width;
@@ -358,19 +546,24 @@ void apply_output_config(struct output_config *oc, swayc_t *output) {
 		}
 	}
 
+	int output_i;
+	for (output_i = 0; output_i < root_container.children->length; ++output_i) {
+		if (root_container.children->items[output_i] == output) {
+			break;
+		}
+	}
+
 	if (oc && oc->background) {
-		int i;
-		for (i = 0; i < root_container.children->length; ++i) {
-			if (root_container.children->items[i] == output) {
-				break;
-			}
+
+		if (output->bg_pid != 0) {
+			terminate_swaybg(output->bg_pid);
 		}
 
-		sway_log(L_DEBUG, "Setting background for output %d to %s", i, oc->background);
+		sway_log(L_DEBUG, "Setting background for output %d to %s", output_i, oc->background);
 
 		size_t bufsize = 4;
 		char output_id[bufsize];
-		snprintf(output_id, bufsize, "%d", i);
+		snprintf(output_id, bufsize, "%d", output_i);
 		output_id[bufsize-1] = 0;
 
 		char *const cmd[] = {
@@ -380,10 +573,15 @@ void apply_output_config(struct output_config *oc, swayc_t *output) {
 			oc->background_option,
 			NULL,
 		};
-		if (fork() == 0) {
+
+		output->bg_pid = fork();
+		if (output->bg_pid == 0) {
 			execvp(cmd[0], cmd);
 		}
 	}
+
+	// load swaybars for output
+	load_swaybars(output, output_i);
 }
 
 char *do_var_replacement(char *str) {
@@ -454,15 +652,27 @@ int sway_binding_cmp_keys(const void *a, const void *b) {
 	} else if (binda->modifiers < bindb->modifiers) {
 		return -1;
 	}
+	struct wlc_modifiers no_mods = { 0, 0 };
 	for (int i = 0; i < binda->keys->length; i++) {
-		xkb_keysym_t *ka = binda->keys->items[i],
-				*kb = bindb->keys->items[i];
-		if (*ka > *kb) {
+		xkb_keysym_t ka = *(xkb_keysym_t *)binda->keys->items[i],
+			kb = *(xkb_keysym_t *)bindb->keys->items[i];
+		if (binda->bindcode) {
+			uint32_t *keycode = binda->keys->items[i];
+			ka = wlc_keyboard_get_keysym_for_key(*keycode, &no_mods);
+		}
+
+		if (bindb->bindcode) {
+			uint32_t *keycode = bindb->keys->items[i];
+			kb = wlc_keyboard_get_keysym_for_key(*keycode, &no_mods);
+		}
+
+		if (ka > kb) {
 			return 1;
-		} else if (*ka < *kb) {
+		} else if (ka < kb) {
 			return -1;
 		}
 	}
+
 	return 0;
 }
 
@@ -473,6 +683,10 @@ int sway_binding_cmp(const void *a, const void *b) {
 	}
 	const struct sway_binding *binda = a, *bindb = b;
 	return lenient_strcmp(binda->command, bindb->command);
+}
+
+int sway_binding_cmp_qsort(const void *a, const void *b) {
+	return sway_binding_cmp(*(void **)a, *(void **)b);
 }
 
 void free_sway_binding(struct sway_binding *binding) {
@@ -486,4 +700,96 @@ void free_sway_binding(struct sway_binding *binding) {
 		free(binding->command);
 	}
 	free(binding);
+}
+
+int sway_mouse_binding_cmp_buttons(const void *a, const void *b) {
+	const struct sway_mouse_binding *binda = a, *bindb = b;
+	if (binda->button > bindb->button) {
+		return 1;
+	}
+	if (binda->button < bindb->button) {
+		return -1;
+	}
+	return 0;
+}
+
+int sway_mouse_binding_cmp(const void *a, const void *b) {
+	int cmp = 0;
+	if ((cmp = sway_binding_cmp_keys(a, b)) != 0) {
+		return cmp;
+	}
+	const struct sway_mouse_binding *binda = a, *bindb = b;
+	return lenient_strcmp(binda->command, bindb->command);
+}
+
+int sway_mouse_binding_cmp_qsort(const void *a, const void *b) {
+	return sway_mouse_binding_cmp(*(void **)a, *(void **)b);
+}
+
+void free_sway_mouse_binding(struct sway_mouse_binding *binding) {
+	if (binding->command) {
+		free(binding->command);
+	}
+	free(binding);
+}
+
+struct sway_binding *sway_binding_dup(struct sway_binding *sb) {
+	struct sway_binding *new_sb = malloc(sizeof(struct sway_binding));
+
+	new_sb->order = sb->order;
+	new_sb->modifiers = sb->modifiers;
+	new_sb->command = strdup(sb->command);
+
+	new_sb->keys = create_list();
+	int i;
+	for (i = 0; i < sb->keys->length; ++i) {
+		xkb_keysym_t *key = malloc(sizeof(xkb_keysym_t));
+		*key = *(xkb_keysym_t *)sb->keys->items[i];
+		list_add(new_sb->keys, key);
+	}
+
+	return new_sb;
+}
+
+struct bar_config *default_bar_config(void) {
+	struct bar_config *bar = NULL;
+	bar = malloc(sizeof(struct bar_config));
+	bar->mode = strdup("dock");
+	bar->hidden_state = strdup("hide");
+	bar->modifier = WLC_BIT_MOD_LOGO;
+	bar->outputs = NULL;
+	bar->position = DESKTOP_SHELL_PANEL_POSITION_BOTTOM;
+	bar->bindings = create_list();
+	bar->status_command = strdup("while :; do date +'%Y-%m-%d %l:%M:%S %p' && sleep 1; done");
+	bar->swaybar_command = NULL;
+	bar->font = strdup("pango:monospace 10");
+	bar->height = -1;
+	bar->workspace_buttons = true;
+	bar->separator_symbol = NULL;
+	bar->strip_workspace_numbers = false;
+	bar->binding_mode_indicator = true;
+	bar->tray_padding = 2;
+	// set default colors
+	strcpy(bar->colors.background, "#000000ff");
+	strcpy(bar->colors.statusline, "#ffffffff");
+	strcpy(bar->colors.separator, "#666666ff");
+	strcpy(bar->colors.focused_workspace_border, "#4c7899ff");
+	strcpy(bar->colors.focused_workspace_bg, "#285577ff");
+	strcpy(bar->colors.focused_workspace_text, "#ffffffff");
+	strcpy(bar->colors.active_workspace_border, "#333333ff");
+	strcpy(bar->colors.active_workspace_bg, "#5f676aff");
+	strcpy(bar->colors.active_workspace_text, "#ffffffff");
+	strcpy(bar->colors.inactive_workspace_border, "#333333ff");
+	strcpy(bar->colors.inactive_workspace_bg,"#222222ff");
+	strcpy(bar->colors.inactive_workspace_text, "#888888ff");
+	strcpy(bar->colors.urgent_workspace_border, "#2f343aff");
+	strcpy(bar->colors.urgent_workspace_bg,"#900000ff");
+	strcpy(bar->colors.urgent_workspace_text, "#ffffffff");
+	strcpy(bar->colors.binding_mode_border, "#2f343aff");
+	strcpy(bar->colors.binding_mode_bg,"#900000ff");
+	strcpy(bar->colors.binding_mode_text, "#ffffffff");
+
+	list_add(config->bars, bar);
+
+	return bar;
 }

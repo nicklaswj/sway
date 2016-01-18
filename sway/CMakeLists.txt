@@ -21,7 +21,6 @@ add_executable(sway
 	main.c
 	output.c
 	resize.c
-	util.c
 	workspace.c
 )
 
@@ -33,6 +32,7 @@ target_link_libraries(sway
 	${PCRE_LIBRARIES}
 	${JSONC_LIBRARIES}
 	${WAYLAND_SERVER_LIBRARIES}
+	m
 )
 
 install(
@@ -43,7 +43,7 @@ install(
 )
 install(
 	FILES ${PROJECT_SOURCE_DIR}/config
-	DESTINATION ${FALLBACK_CONFIG_DIR}
+	DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/sway/
 	COMPONENT configuration
 )
 

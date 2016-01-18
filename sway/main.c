@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <signal.h>
+#include <unistd.h>
 #include <getopt.h>
 #include "extensions.h"
 #include "layout.h"
@@ -14,6 +15,7 @@
 #include "log.h"
 #include "readline.h"
 #include "handlers.h"
+#include "ipc-client.h"
 #include "ipc-server.h"
 #include "sway.h"
 
@@ -22,6 +24,11 @@ static bool terminate_request = false;
 void sway_terminate(void) {
 	terminate_request = true;
 	wlc_terminate();
+}
+
+void sig_handler(int signal) {
+	close_views(&root_container);
+	sway_terminate();
 }
 
 static void wlc_log_handler(enum wlc_log_type type, const char *str) {
@@ -34,7 +41,7 @@ static void wlc_log_handler(enum wlc_log_type type, const char *str) {
 	}
 }
 
-void detect_nvidia() {
+void detect_proprietary() {
 	FILE *f = fopen("/proc/modules", "r");
 	if (!f) {
 		return;
@@ -46,9 +53,22 @@ void detect_nvidia() {
 			free(line);
 			break;
 		}
+		if (strstr(line, "fglrx")) {
+			fprintf(stderr, "\x1B[1;31mWarning: Proprietary AMD drivers do NOT support Wayland. Use radeon.\x1B[0m\n");
+			free(line);
+			break;
+		}
 		free(line);
 	}
 	fclose(f);
+}
+
+void run_as_ipc_client(char *command, char *socket_path) {
+	int socketfd = ipc_open_socket(socket_path);
+	uint32_t len = strlen(command);
+	char *resp = ipc_single_command(socketfd, IPC_COMMAND, command, &len);
+	printf("%s\n", resp);
+	close(socketfd);
 }
 
 int main(int argc, char **argv) {
@@ -126,6 +146,21 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	if (optind < argc) { // Behave as IPC client
+		if (getuid() != geteuid() || getgid() != getegid()) {
+			if (setgid(getgid()) != 0 || setuid(getuid()) != 0) {
+				sway_abort("Unable to drop root");
+			}
+		}
+		char *socket_path = getenv("SWAYSOCK");
+		if (!socket_path) {
+			sway_abort("Unable to retrieve socket path");
+		}
+		char *command = join_args(argv + optind, argc - optind);
+		run_as_ipc_client(command, socket_path);
+		return 0;
+	}
+
 	// we need to setup logging before wlc_init in case it fails.
 	if (debug) {
 		init_log(L_DEBUG);
@@ -136,7 +171,7 @@ int main(int argc, char **argv) {
 	}
 	setenv("WLC_DIM", "0", 0);
 	wlc_log_set_handler(wlc_log_handler);
-	detect_nvidia();
+	detect_proprietary();
 
 	/* Changing code earlier than this point requires detailed review */
 	/* (That code runs as root on systems without logind, and wlc_init drops to
@@ -146,16 +181,19 @@ int main(int argc, char **argv) {
 	}
 	register_extensions();
 
+	// handle SIGTERM signals
+	signal(SIGTERM, sig_handler);
+
 #if defined SWAY_GIT_VERSION && defined SWAY_GIT_BRANCH && defined SWAY_VERSION_DATE
 	sway_log(L_INFO, "Starting sway version %s (%s, branch \"%s\")\n", SWAY_GIT_VERSION, SWAY_VERSION_DATE, SWAY_GIT_BRANCH);
 #endif
+
+	init_layout();
 
 	if (validate) {
 		bool valid = load_config(config_path);
 		return valid ? 0 : 1;
 	}
-
-	init_layout();
 
 	if (!load_config(config_path)) {
 		sway_log(L_ERROR, "Error(s) loading config!");

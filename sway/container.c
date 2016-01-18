@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <strings.h>
@@ -38,6 +39,9 @@ static void free_swayc(swayc_t *cont) {
 		}
 		list_free(cont->children);
 	}
+	if (cont->unmanaged) {
+		list_free(cont->unmanaged);
+	}
 	if (cont->floating) {
 		while (cont->floating->length) {
 			free_swayc(cont->floating->items[0]);
@@ -55,6 +59,13 @@ static void free_swayc(swayc_t *cont) {
 	}
 	if (cont->app_id) {
 		free(cont->app_id);
+	}
+	if (cont->bar_pids) {
+		terminate_swaybars(cont->bar_pids);
+		free_flat_list(cont->bar_pids);
+	}
+	if (cont->bg_pid != 0) {
+		terminate_swaybg(cont->bg_pid);
 	}
 	free(cont);
 }
@@ -104,6 +115,9 @@ swayc_t *new_output(wlc_handle handle) {
 	output->name = name ? strdup(name) : NULL;
 	output->width = size->w;
 	output->height = size->h;
+	output->unmanaged = create_list();
+	output->bar_pids = create_list();
+	output->bg_pid = 0;
 
 	apply_output_config(oc, output);
 	add_child(&root_container, output);
@@ -135,7 +149,7 @@ swayc_t *new_output(wlc_handle handle) {
 	ws->is_focused = true;
 
 	free(ws_name);
-	
+
 	return output;
 }
 
@@ -164,7 +178,24 @@ swayc_t *new_workspace(swayc_t *output, const char *name) {
 	workspace->visible = false;
 	workspace->floating = create_list();
 
-	add_child(output, workspace);
+	if (isdigit(workspace->name[0])) {
+		// find position for numbered workspace
+		// order: ascending numbers, insert before same number
+		//        numbers before unnumbered
+		int num = strtol(workspace->name, NULL, 10);
+		int i;
+		for (i = 0; i < output->children->length; ++i) {
+			char *name = ((swayc_t *)output->children->items[i])->name;
+			if (!isdigit(name[0]) || num <= strtol(name, NULL, 10)) {
+				break;
+			}
+		}
+		insert_child(output, workspace, i);
+
+	} else {
+		// append new unnumbered to the end
+		add_child(output, workspace);
+	}
 	return workspace;
 }
 
@@ -323,24 +354,42 @@ swayc_t *destroy_workspace(swayc_t *workspace) {
 	if (!ASSERT_NONNULL(workspace)) {
 		return NULL;
 	}
-	// NOTE: This is called from elsewhere without checking children length
-	// TODO move containers to other workspaces?
-	// for now just dont delete
-	
+
 	// Do not destroy this if it's the last workspace on this output
 	swayc_t *output = swayc_parent_by_type(workspace, C_OUTPUT);
 	if (output && output->children->length == 1) {
 		return NULL;
 	}
 
-	// Do not destroy if there are children
+	swayc_t *parent = workspace->parent;
+	// destroy the WS if there are no children
 	if (workspace->children->length == 0 && workspace->floating->length == 0) {
 		sway_log(L_DEBUG, "destroying workspace '%s'", workspace->name);
-		swayc_t *parent = workspace->parent;
-		free_swayc(workspace);
-		return parent;
+	} else {
+		// Move children to a different workspace on this output
+		swayc_t *new_workspace = NULL;
+		int i;
+		for(i = 0; i < output->children->length; i++) {
+			if(output->children->items[i] != workspace) {
+				break;
+			}
+		}
+		new_workspace = output->children->items[i];
+
+		sway_log(L_DEBUG, "moving children to different workspace '%s' -> '%s'",
+			workspace->name, new_workspace->name);
+
+		for(i = 0; i < workspace->children->length; i++) {
+			move_container_to(workspace->children->items[i], new_workspace);
+		}
+
+		for(i = 0; i < workspace->floating->length; i++) {
+			move_container_to(workspace->floating->items[i], new_workspace);
+		}
 	}
-	return NULL;
+
+	free_swayc(workspace);
+	return parent;
 }
 
 swayc_t *destroy_container(swayc_t *container) {
@@ -622,7 +671,16 @@ int swayc_gap(swayc_t *container) {
 	if (container->type == C_VIEW) {
 		return container->gaps >= 0 ? container->gaps : config->gaps_inner;
 	} else if (container->type == C_WORKSPACE) {
-		return container->gaps >= 0 ? container->gaps : config->gaps_outer;
+		int base = container->gaps >= 0 ? container->gaps : config->gaps_outer;
+		if (config->edge_gaps) {
+			// the inner gap is created via a margin around each window which
+			// is half the gap size, so the workspace also needs half a gap
+			// size to make the outermost gap the same size (excluding the
+			// actual "outer gap" size which is handled independently)
+			return base + config->gaps_inner / 2;
+		} else {
+			return base;
+		}
 	} else {
 		return 0;
 	}
@@ -737,4 +795,14 @@ void add_gaps(swayc_t *view, void *_data) {
 			view->gaps = 0;
 		}
 	}
+}
+
+static void close_view(swayc_t *container, void *data) {
+	if (container->type == C_VIEW) {
+		wlc_view_close(container->handle);
+	}
+}
+
+void close_views(swayc_t *container) {
+	container_map(container, close_view, NULL);
 }

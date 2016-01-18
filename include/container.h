@@ -1,5 +1,6 @@
 #ifndef _SWAY_CONTAINER_H
 #define _SWAY_CONTAINER_H
+#include <sys/types.h>
 #include <wlc/wlc.h>
 typedef struct sway_container swayc_t;
 
@@ -81,6 +82,11 @@ struct sway_container {
 	char *class;
 	char *app_id;
 
+	// Used by output containers to keep track of swaybar/swaybg child
+	// processes.
+	list_t *bar_pids;
+	pid_t bg_pid;
+
 	int gaps;
 
 	list_t *children;
@@ -88,6 +94,10 @@ struct sway_container {
 	 * Children of this container that are floated.
 	 */
 	list_t *floating;
+	/**
+	 * Unmanaged view handles in this container.
+	 */
+	list_t *unmanaged;
 
 	/**
 	 * The parent of this container. NULL for the root container.
@@ -97,6 +107,10 @@ struct sway_container {
 	 * Which of this container's children has focus.
 	 */
 	struct sway_container *focused;
+	/**
+	 * If this container's children include a fullscreen view, this is that view.
+	 */
+	struct sway_container *fullscreen;
 };
 
 enum visibility_mask {
@@ -245,5 +259,10 @@ void add_gaps(swayc_t *view, void *amount);
  * Issue wlc calls to make the visibility of a container consistent.
  */
 void update_visibility(swayc_t *container);
+
+/**
+ * Close all child views of container
+ */
+void close_views(swayc_t *container);
 
 #endif

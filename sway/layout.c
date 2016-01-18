@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
+#include <math.h>
 #include <wlc/wlc.h>
 #include "extensions.h"
 #include "layout.h"
@@ -10,6 +11,7 @@
 #include "workspace.h"
 #include "focus.h"
 #include "output.h"
+#include "ipc-server.h"
 
 swayc_t root_container;
 list_t *scratchpad;
@@ -98,6 +100,8 @@ swayc_t *add_sibling(swayc_t *fixed, swayc_t *active) {
 		list_insert(parent->children, i + 1, active);
 	}
 	active->parent = parent;
+	// focus new child
+	parent->focused = active;
 	return active->parent;
 }
 
@@ -307,11 +311,24 @@ void move_container_to(swayc_t* container, swayc_t* destination) {
 	swayc_t *parent = remove_child(container);
 	// Send to new destination
 	if (container->is_floating) {
-		add_floating(swayc_active_workspace_for(destination), container);
+		swayc_t *ws = swayc_active_workspace_for(destination);
+		add_floating(ws, container);
+
+		// If the workspace only has one child after adding one, it
+		// means that the workspace was just initialized.
+		if (ws->children->length + ws->floating->length == 1) {
+			ipc_event_workspace(NULL, ws, "init");
+		}
 	} else if (destination->type == C_WORKSPACE) {
 		// reset container geometry
 		container->width = container->height = 0;
 		add_child(destination, container);
+
+		// If the workspace only has one child after adding one, it
+		// means that the workspace was just initialized.
+		if (destination->children->length + destination->floating->length == 1) {
+			ipc_event_workspace(NULL, destination, "init");
+		}
 	} else {
 		// reset container geometry
 		container->width = container->height = 0;
@@ -363,6 +380,11 @@ void update_geometry(swayc_t *container) {
 	swayc_t *ws = swayc_parent_by_type(container, C_WORKSPACE);
 	swayc_t *op = ws->parent;
 	int gap = container->is_floating ? 0 : swayc_gap(container);
+	if (gap % 2 != 0) {
+		// because gaps are implemented as "half sized margins" it's currently
+		// not possible to align views properly with odd sized gaps.
+		gap -= 1;
+	}
 
 	struct wlc_geometry geometry = {
 		.origin = {
@@ -375,10 +397,12 @@ void update_geometry(swayc_t *container) {
 		}
 	};
 	if (swayc_is_fullscreen(container)) {
+		swayc_t *output = swayc_parent_by_type(container, C_OUTPUT);
+		const struct wlc_size *size = wlc_output_get_resolution(output->handle);
 		geometry.origin.x = 0;
 		geometry.origin.y = 0;
-		geometry.size.w = op->width;
-		geometry.size.h = op->height;
+		geometry.size.w = size->w;
+		geometry.size.h = size->h;
 		if (op->focused == ws) {
 			wlc_view_bring_to_front(container->handle);
 		}
@@ -396,10 +420,10 @@ void update_geometry(swayc_t *container) {
 			geometry.size.h = container->height - gap/2;
 		}
 		if (container->x + container->width + gap >= ws->x + ws->width) {
-			geometry.size.w = ws->width - geometry.origin.x;
+			geometry.size.w = ws->x + ws->width - geometry.origin.x;
 		}
 		if (container->y + container->height + gap >= ws->y + ws->height) {
-			geometry.size.h = ws->height - geometry.origin.y;
+			geometry.size.h = ws->y + ws->height - geometry.origin.y;
 		}
 	}
 	wlc_view_set_geometry(container->handle, 0, &geometry);
@@ -412,29 +436,54 @@ static void arrange_windows_r(swayc_t *container, double width, double height) {
 		width = container->width;
 		height = container->height;
 	}
+	// pixels are indivisable. if we don't round the pixels, then the view
+	// calculations will be off (e.g. 50.5 + 50.5 = 101, but in reality it's
+	// 50 + 50 = 100). doing it here cascades properly to all width/height/x/y.
+	width = floor(width);
+	height = floor(height);
 
 	sway_log(L_DEBUG, "Arranging layout for %p %s %fx%f+%f,%f", container,
 		container->name, container->width, container->height, container->x, container->y);
 
-	int x = 0, y = 0;
+	double x = 0, y = 0;
 	switch (container->type) {
 	case C_ROOT:
 		for (i = 0; i < container->children->length; ++i) {
-			swayc_t *child = container->children->items[i];
-			sway_log(L_DEBUG, "Arranging output at %d", x);
-			arrange_windows_r(child, -1, -1);
-			x += child->width;
+			swayc_t *output = container->children->items[i];
+			sway_log(L_DEBUG, "Arranging output '%s' at %f,%f", output->name, output->x, output->y);
+			arrange_windows_r(output, -1, -1);
 		}
 		return;
 	case C_OUTPUT:
 		{
 			struct wlc_size resolution = *wlc_output_get_resolution(container->handle);
 			width = resolution.w; height = resolution.h;
+			// output must have correct size due to e.g. seamless mouse,
+			// but a workspace might be smaller depending on panels.
+			container->width = width;
+			container->height = height;
+		}
+		// arrange all workspaces:
+		for (i = 0; i < container->children->length; ++i) {
+			swayc_t *child = container->children->items[i];
+			arrange_windows_r(child, -1, -1);
+		}
+		// Bring all unmanaged views to the front
+		for (i = 0; i < container->unmanaged->length; ++i) {
+			wlc_handle *handle = container->unmanaged->items[i];
+			wlc_view_bring_to_front(*handle);
+		}
+		return;
+	case C_WORKSPACE:
+		{
+			swayc_t *output = swayc_parent_by_type(container, C_OUTPUT);
+			width = output->width, height = output->height;
 			for (i = 0; i < desktop_shell.panels->length; ++i) {
 				struct panel_config *config = desktop_shell.panels->items[i];
-				if (config->output == container->handle) {
+				if (config->output == output->handle) {
 					struct wlc_size size = *wlc_surface_get_size(config->surface);
-					switch (desktop_shell.panel_position) {
+					sway_log(L_DEBUG, "-> Found panel for this workspace: %ux%u, position: %u", size.w, size.h, config->panel_position);
+					switch (config->panel_position) {
 					case DESKTOP_SHELL_PANEL_POSITION_TOP:
 						y += size.h; height -= size.h;
 						break;
@@ -450,22 +499,15 @@ static void arrange_windows_r(swayc_t *container, double width, double height) {
 					}
 				}
 			}
-
-			container->width = width;
-			container->height = height;
-			x = 0, y = 0;
-			for (i = 0; i < container->children->length; ++i) {
-				swayc_t *child = container->children->items[i];
-				int gap = swayc_gap(child);
-				child->x = x + gap;
-				child->y = y + gap;
-				child->width = width - gap * 2;
-				child->height = height - gap * 2;
-				sway_log(L_DEBUG, "Arranging workspace #%d at %f, %f", i, child->x, child->y);
-				arrange_windows_r(child, -1, -1);
-			}
+			int gap = swayc_gap(container);
+			x = container->x = x + gap;
+			y = container->y = y + gap;
+			width = container->width = width - gap * 2;
+			height = container->height = height - gap * 2;
+			sway_log(L_DEBUG, "Arranging workspace '%s' at %f, %f", container->name, container->x, container->y);
 		}
-		return;
+		 // children are properly handled below
+		break;
 	case C_VIEW:
 		{
 			container->width = width;
@@ -478,10 +520,11 @@ static void arrange_windows_r(swayc_t *container, double width, double height) {
 	default:
 		container->width = width;
 		container->height = height;
+		x = container->x;
+		y = container->y;
 		break;
 	}
 
-	x = y = 0;
 	double scale = 0;
 	switch (container->layout) {
 	case L_HORIZ:
@@ -505,9 +548,14 @@ static void arrange_windows_r(swayc_t *container, double width, double height) {
 			for (i = 0; i < container->children->length; ++i) {
 				swayc_t *child = container->children->items[i];
 				sway_log(L_DEBUG, "Calculating arrangement for %p:%d (will scale %f by %f)", child, child->type, width, scale);
-				child->x = x + container->x;
-				child->y = y + container->y;
-				arrange_windows_r(child, child->width * scale, height);
+				child->x = x;
+				child->y = y;
+				if (i == container->children->length - 1) {
+					double remaining_width = container->x + width - x;
+					arrange_windows_r(child, remaining_width, height);
+				} else {
+					arrange_windows_r(child, child->width * scale, height);
+				}
 				x += child->width;
 			}
 		}
@@ -532,9 +580,14 @@ static void arrange_windows_r(swayc_t *container, double width, double height) {
 			for (i = 0; i < container->children->length; ++i) {
 				swayc_t *child = container->children->items[i];
 				sway_log(L_DEBUG, "Calculating arrangement for %p:%d (will scale %f by %f)", child, child->type, height, scale);
-				child->x = x + container->x;
-				child->y = y + container->y;
-				arrange_windows_r(child, width, child->height * scale);
+				child->x = x;
+				child->y = y;
+				if (i == container->children->length - 1) {
+					double remaining_height = container->y + height - y;
+					arrange_windows_r(child, width, remaining_height);
+				} else {
+					arrange_windows_r(child, width, child->height * scale);
+				}
 				y += child->height;
 			}
 		}
@@ -577,6 +630,19 @@ swayc_t *get_swayc_in_direction_under(swayc_t *container, enum movement_directio
 	// output might border to multiple outputs).
 	struct wlc_point abs_pos;
 	get_absolute_center_position(container, &abs_pos);
+
+	if (container->type == C_VIEW && swayc_is_fullscreen(container)) {
+		sway_log(L_DEBUG, "Moving from fullscreen view, skipping to output");
+		container = swayc_parent_by_type(container, C_OUTPUT);
+		get_absolute_center_position(container, &abs_pos);
+		return swayc_adjacent_output(container, dir, &abs_pos, true);
+	}
+
+	if (container->type == C_WORKSPACE && container->fullscreen) {
+		sway_log(L_DEBUG, "Moving to fullscreen view");
+		return container->fullscreen;
+	}
+
 	while (true) {
 		// Test if we can even make a difference here
 		bool can_move = false;

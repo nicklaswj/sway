@@ -1,8 +1,11 @@
 #include <stdlib.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <ctype.h>
 #include <wlc/wlc.h>
 #include <string.h>
 #include <strings.h>
+#include "ipc-server.h"
 #include "workspace.h"
 #include "layout.h"
 #include "list.h"
@@ -16,6 +19,11 @@
 #include "ipc.h"
 
 char *prev_workspace_name = NULL;
+struct workspace_by_number_data {
+	int len;
+	const char *cset;
+	const char *name;
+};
 
 char *workspace_next_name(void) {
 	sway_log(L_DEBUG, "Workspace: Generating new name");
@@ -25,6 +33,8 @@ char *workspace_next_name(void) {
 	// if none are found/available then default to a number
 	struct sway_mode *mode = config->current_mode;
 
+	int order = INT_MAX;
+	char *target = NULL;
 	for (i = 0; i < mode->bindings->length; ++i) {
 		struct sway_binding *binding = mode->bindings->items[i];
 		char *cmdlist = strdup(binding->command);
@@ -39,34 +49,40 @@ char *workspace_next_name(void) {
 
 		if (strcmp("workspace", cmd) == 0 && name) {
 			sway_log(L_DEBUG, "Got valid workspace command for target: '%s'", name);
-			char* target = strdup(name);
-			while (*target == ' ' || *target == '\t')
-				target++;
+			char *_target = strdup(name);
+			strip_quotes(_target);
+			while (isspace(*_target))
+				_target++;
 
 			// Make sure that the command references an actual workspace
 			// not a command about workspaces
-			if (strcmp(target, "next") == 0 ||
-				strcmp(target, "prev") == 0 ||
-				strcmp(target, "next_on_output") == 0 ||
-				strcmp(target, "prev_on_output") == 0 ||
-				strcmp(target, "number") == 0 ||
-				strcmp(target, "back_and_forth") == 0 ||
-				strcmp(target, "current") == 0)
+			if (strcmp(_target, "next") == 0 ||
+				strcmp(_target, "prev") == 0 ||
+				strcmp(_target, "next_on_output") == 0 ||
+				strcmp(_target, "prev_on_output") == 0 ||
+				strcmp(_target, "number") == 0 ||
+				strcmp(_target, "back_and_forth") == 0 ||
+				strcmp(_target, "current") == 0)
 			{
-				free(target);
+				free(_target);
 				continue;
 			}
 
 			// Make sure that the workspace doesn't already exist
-			if (workspace_by_name(target)) {
-				free(target);
+			if (workspace_by_name(_target)) {
+				free(_target);
 				continue;
 			}
-			free(dup);
-			sway_log(L_DEBUG, "Workspace: Found free name %s", target);
-			return target;
+			if (binding->order < order) {
+				order = binding->order;
+				target = _target;
+				sway_log(L_DEBUG, "Workspace: Found free name %s", _target);
+			}
 		}
 		free(dup);
+	}
+	if (target != NULL) {
+		return target;
 	}
 	// As a fall back, get the current number of active workspaces
 	// and return that + 1 for the next workspace's name
@@ -130,6 +146,23 @@ swayc_t *workspace_by_name(const char* name) {
 	else {
 		return swayc_by_test(&root_container, _workspace_by_name, (void *) name);
 	}
+}
+
+static bool _workspace_by_number(swayc_t *view, void *data) {
+	if (view->type != C_WORKSPACE) {
+		return false;
+	}
+	struct workspace_by_number_data *wbnd = data;
+	int a = strspn(view->name, wbnd->cset);
+	return a == wbnd->len && strncmp(view->name, wbnd->name, a) == 0;
+}
+swayc_t *workspace_by_number(const char* name) {
+	struct workspace_by_number_data wbnd = {0, "1234567890", name};
+	wbnd.len = strspn(name, wbnd.cset);
+	if (wbnd.len <= 0) {
+		return NULL;
+	}
+	return swayc_by_test(&root_container, _workspace_by_number, (void *) &wbnd);
 }
 
 /**
@@ -246,6 +279,7 @@ bool workspace_switch(swayc_t *workspace) {
 	if (!set_focused_container(get_focused_view(workspace))) {
 		return false;
 	}
-	arrange_windows(workspace, -1, -1);
+	swayc_t *output = swayc_parent_by_type(workspace, C_OUTPUT);
+	arrange_windows(output, -1, -1);
 	return true;
 }

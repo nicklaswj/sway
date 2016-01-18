@@ -34,10 +34,14 @@ static void update_focus(swayc_t *c) {
 		// Case where workspace changes
 		case C_WORKSPACE:
 			if (prev) {
-				ipc_event_workspace(prev, c);
+				ipc_event_workspace(prev, c, "focus");
 				// update visibility of old workspace
 				update_visibility(prev);
-				destroy_workspace(prev);
+
+				// if the old workspace has no children, destroy it
+				if(prev->children->length == 0 && prev->floating->length == 0){
+					destroy_workspace(prev);
+				}
 			}
 			// Update visibility of newly focused workspace
 			update_visibility(c);
@@ -91,6 +95,12 @@ bool set_focused_container(swayc_t *c) {
 	if (locked_container_focus || !c || !c->parent) {
 		return false;
 	}
+	swayc_t *active_ws = swayc_active_workspace();
+	int active_ws_child_count = 0;
+	if (active_ws) {
+		active_ws_child_count = active_ws->children->length + active_ws->floating->length;
+	}
+
 	swayc_log(L_DEBUG, c, "Setting focus to %p:%ld", c, c->handle);
 
 	// Get workspace for c, get that workspaces current focused container.
@@ -128,6 +138,16 @@ bool set_focused_container(swayc_t *c) {
 				wlc_view_focus(p->handle);
 			}
 		}
+	}
+
+	if (active_ws != workspace) {
+		// active_ws might have been destroyed by now
+		// (focus swap away from empty ws = destroy ws)
+		if (active_ws_child_count == 0) {
+			active_ws = NULL;
+		}
+
+		ipc_event_workspace(active_ws, workspace, "focus");
 	}
 	return true;
 }

@@ -20,6 +20,7 @@
 #include "resize.h"
 #include "extensions.h"
 #include "criteria.h"
+#include "ipc-server.h"
 
 // Event should be sent to client
 #define EVENT_PASSTHROUGH false
@@ -90,7 +91,7 @@ static void handle_output_pre_render(wlc_handle output) {
 			struct wlc_geometry geo = {
 				.size = size
 			};
-			switch (desktop_shell.panel_position) {
+			switch (config->panel_position) {
 			case DESKTOP_SHELL_PANEL_POSITION_TOP:
 				geo.origin = (struct wlc_point){ 0, 0 };
 				break;
@@ -220,6 +221,16 @@ static bool handle_view_created(wlc_handle handle) {
 			// refocus in-between command lists
 			set_focused_container(newview);
 		}
+		swayc_t *workspace = swayc_parent_by_type(focused, C_WORKSPACE);
+		if (workspace && workspace->fullscreen) {
+			set_focused_container(workspace->fullscreen);
+		}
+	} else {
+		swayc_t *output = swayc_parent_by_type(focused, C_OUTPUT);
+		wlc_handle *h = malloc(sizeof(wlc_handle));
+		*h = handle;
+		sway_log(L_DEBUG, "Adding unmanaged window %p to %p", h, output->unmanaged);
+		list_add(output->unmanaged, h);
 	}
 	return true;
 }
@@ -246,9 +257,28 @@ static void handle_view_destroyed(wlc_handle handle) {
 	}
 
 	if (view) {
-		swayc_t *parent = destroy_view(view);
+		bool fullscreen = swayc_is_fullscreen(view);
 		remove_view_from_scratchpad(view);
+		swayc_t *parent = destroy_view(view);
+		if (fullscreen) {
+			parent->fullscreen = NULL;
+		}
 		arrange_windows(parent, -1, -1);
+	} else {
+		// Is it unmanaged?
+		int i;
+		for (i = 0; i < root_container.children->length; ++i) {
+			swayc_t *output = root_container.children->items[i];
+			int j;
+			for (j = 0; j < output->unmanaged->length; ++j) {
+				wlc_handle *_handle = output->unmanaged->items[j];
+				if (*_handle == handle) {
+					list_del(output->unmanaged, j);
+					free(_handle);
+					break;
+				}
+			}
+		}
 	}
 	set_focused_container(get_focused_view(&root_container));
 }
@@ -258,8 +288,8 @@ static void handle_view_focus(wlc_handle view, bool focus) {
 }
 
 static void handle_view_geometry_request(wlc_handle handle, const struct wlc_geometry *geometry) {
-	sway_log(L_DEBUG, "geometry request for %ld %dx%d : %dx%d",
-			handle, geometry->origin.x, geometry->origin.y, geometry->size.w, geometry->size.h);
+	sway_log(L_DEBUG, "geometry request for %ld %dx%d @ %d,%d", handle,
+			geometry->size.w, geometry->size.h, geometry->origin.x, geometry->origin.y);
 	// If the view is floating, then apply the geometry.
 	// Otherwise save the desired width/height for the view.
 	// This will not do anything for the time being as WLC improperly sends geometry requests
@@ -306,9 +336,72 @@ static void handle_view_state_request(wlc_handle view, enum wlc_view_state_bit s
 	return;
 }
 
+static void handle_binding_command(struct sway_binding *binding) {
+	struct sway_binding *binding_copy = binding;
+	bool reload = false;
+	// if this is a reload command we need to make a duplicate of the
+	// binding since it will be gone after the reload has completed.
+	if (strcasecmp(binding->command, "reload") == 0) {
+		binding_copy = sway_binding_dup(binding);
+		reload = true;
+	}
+
+	struct cmd_results *res = handle_command(binding->command);
+	if (res->status != CMD_SUCCESS) {
+		sway_log(L_ERROR, "Command '%s' failed: %s", res->input, res->error);
+	}
+	ipc_event_binding_keyboard(binding_copy);
+
+	if (reload) { // free the binding if we made a copy
+		free_sway_binding(binding_copy);
+	}
+
+	free_cmd_results(res);
+}
+
+static bool handle_bindsym(struct sway_binding *binding) {
+	bool match = false;
+	int i;
+	for (i = 0; i < binding->keys->length; ++i) {
+		if (binding->bindcode) {
+			xkb_keycode_t *key = binding->keys->items[i];
+			if ((match = check_key(0, *key)) == false) {
+				break;
+			}
+		} else {
+			xkb_keysym_t *key = binding->keys->items[i];
+			if ((match = check_key(*key, 0)) == false) {
+				break;
+			}
+		}
+	}
+
+	if (match) {
+		handle_binding_command(binding);
+		return true;
+	}
+
+	return false;
+}
+
+static bool handle_bindsym_release(struct sway_binding *binding) {
+	if (binding->keys->length == 1) {
+		xkb_keysym_t *key = binding->keys->items[0];
+		if (check_released_key(*key)) {
+			handle_binding_command(binding);
+			return true;
+		}
+	}
+
+	return false;
+}
 
 static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifiers,
 		uint32_t key, enum wlc_key_state state) {
+
+	if (desktop_shell.is_locked) {
+		return EVENT_PASSTHROUGH;
+	}
 
 	if (locked_view_focus && state == WLC_KEY_STATE_PRESSED) {
 		return EVENT_PASSTHROUGH;
@@ -332,36 +425,51 @@ static bool handle_key(wlc_handle view, uint32_t time, const struct wlc_modifier
 		release_key(sym, key);
 	}
 
+	// handle bar modifiers pressed/released
+	uint32_t modifier;
+	for (i = 0; i < config->active_bar_modifiers->length; ++i) {
+		modifier = *(uint32_t *)config->active_bar_modifiers->items[i];
+
+		switch (modifier_state_changed(modifiers->mods, modifier)) {
+		case MOD_STATE_PRESSED:
+			ipc_event_modifier(modifier, "pressed");
+			break;
+		case MOD_STATE_RELEASED:
+			ipc_event_modifier(modifier, "released");
+			break;
+		}
+	}
+	// update modifiers state
+	modifiers_state_update(modifiers->mods);
+
+	// handle bindings
 	for (i = 0; i < mode->bindings->length; ++i) {
 		struct sway_binding *binding = mode->bindings->items[i];
-
 		if ((modifiers->mods ^ binding->modifiers) == 0) {
-			bool match = false;
-			int j;
-			for (j = 0; j < binding->keys->length; ++j) {
-				xkb_keysym_t *key = binding->keys->items[j];
-				if ((match = check_key(*key, 0)) == false) {
-					break;
-				}
-			}
-			if (match) {
-				if (state == WLC_KEY_STATE_PRESSED) {
-					struct cmd_results *res = handle_command(binding->command);
-					if (res->status != CMD_SUCCESS) {
-						sway_log(L_ERROR, "Command '%s' failed: %s", res->input, res->error);
-					}
-					free_cmd_results(res);
+			switch (state) {
+			case WLC_KEY_STATE_PRESSED: {
+				if (!binding->release && handle_bindsym(binding)) {
 					return EVENT_HANDLED;
-				} else if (state == WLC_KEY_STATE_RELEASED) {
-					// TODO: --released
 				}
+				break;
+			}
+			case WLC_KEY_STATE_RELEASED:
+				if (binding->release && handle_bindsym_release(binding)) {
+					return EVENT_HANDLED;
+				}
+				break;
 			}
 		}
 	}
+
 	return EVENT_PASSTHROUGH;
 }
 
 static bool handle_pointer_motion(wlc_handle handle, uint32_t time, const struct wlc_point *origin) {
+	if (desktop_shell.is_locked) {
+		return EVENT_PASSTHROUGH;
+	}
+
 	struct wlc_point new_origin = *origin;
 	// Switch to adjacent output if touching output edge.
 	//

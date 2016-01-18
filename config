@@ -16,6 +16,15 @@ set $term urxvt
 # Your preferred application launcher
 set $menu dmenu_run
 
+### Output configuration
+#
+# Default wallpaper - CC-BY-NC from Netzlemming http://netzlemming.deviantart.com/art/Field-of-Barley-05240017-307176737
+output * bg /usr/share/sway/wallpaper.jpg fill
+#
+# Example output configuration:
+#
+#   output HDMI-A-1 resolution 1920x1080 position 1920,0
+
 ### Key bindings
 #
 # Basics:
@@ -32,7 +41,9 @@ set $menu dmenu_run
     # Drag floating windows by holding down $mod and left mouse button.
     # Resize them with right mouse button + $mod.
     # Despite the name, also works for non-floating windows.
-    floating_modifier $mod
+    # Change normal to inverse to use left mouse button for resizing and right
+    # mouse button for dragging.
+    floating_modifier $mod normal
 
     # reload the configuration file
     bindsym $mod+Shift+c reload
@@ -128,3 +139,15 @@ set $menu dmenu_run
     # Show the next scratchpad window or hide the focused scratchpad window.
     # If there are multiple scratchpad windows, this command cycles through them.
     bindsym $mod+minus scratchpad show
+
+#
+# Status Bar:
+#
+bar {
+        position top
+        colors {
+            statusline #ffffff
+            background #323232
+            inactive_workspace #32323200 #32323200 #5c5c5c
+        }
+}
