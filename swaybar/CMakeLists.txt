@@ -8,6 +8,11 @@ include_directories(
 
 add_executable(swaybar
 	main.c
+	config.c
+	render.c
+	bar.c
+	status_line.c
+	ipc.c
 )
 
 target_link_libraries(swaybar
@@ -18,8 +23,13 @@ target_link_libraries(swaybar
 	${CAIRO_LIBRARIES}
 	${PANGO_LIBRARIES}
 	${JSONC_LIBRARIES}
-	m
 )
+
+if (WITH_GDK_PIXBUF)
+	include_directories(
+		${GDK_PIXBUF_INCLUDE_DIRS}
+	)
+endif()
 
 install(
 	TARGETS swaybar

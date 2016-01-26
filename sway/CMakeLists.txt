@@ -4,6 +4,7 @@ include_directories(
 	${PCRE_INCLUDE_DIRS}
 	${JSONC_INCLUDE_DIRS}
 	${XKBCOMMON_INCLUDE_DIRS}
+	${LIBINPUT_INCLUDE_DIRS}
 )
 
 add_executable(sway
@@ -15,6 +16,7 @@ add_executable(sway
 	extensions.c
 	focus.c
 	handlers.c
+	input.c
 	input_state.c
 	ipc-server.c
 	layout.c
@@ -22,6 +24,10 @@ add_executable(sway
 	output.c
 	resize.c
 	workspace.c
+)
+
+add_definitions(
+	-DSYSCONFDIR="${CMAKE_INSTALL_FULL_SYSCONFDIR}"
 )
 
 target_link_libraries(sway
@@ -32,6 +38,7 @@ target_link_libraries(sway
 	${PCRE_LIBRARIES}
 	${JSONC_LIBRARIES}
 	${WAYLAND_SERVER_LIBRARIES}
+	${LIBINPUT_LIBRARIES}
 	m
 )
 
@@ -49,3 +56,4 @@ install(
 
 add_manpage(sway 1)
 add_manpage(sway 5)
+add_manpage(sway-input 5)
